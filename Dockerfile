@@ -15,6 +15,7 @@ RUN R -e "install.packages(c('BiocManager'), repos='https://cloud.r-project.org/
 
 # Install R packages required for methylation-array analysis
 RUN R -e "BiocManager::install(c('readxl', 'ggplot2', 'plotly', 'patchwork', 'Rtsne', 'matrixStats', 'dplyr', 'sesame', 'DT'))"
+RUN R -e "BiocManager::install(c('rmarkdown', 'pals'))
 
 # Expose the default RStudio port
 EXPOSE 8787
