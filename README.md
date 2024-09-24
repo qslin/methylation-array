@@ -1,6 +1,6 @@
 This repo contains template scripts for methylation-array (EPICv2) analysis.
 
-report.Rmd can be rendered into an HTML report. 
+Render report.Rmd for an HTML report. 
 
 Before rendering, check the following parameters:
 - raw_data_root_folder: path to the folder of all raw data.
@@ -13,5 +13,9 @@ Before rendering, check the following parameters:
 - test_mode: whether to test the script using the first 2000 probes of each sample only and not to overwrite current .RData output; usually used on a local machine.
 - contrast_pairs: a list of vectors; each vector has two character strings, where is the first one is the reference group name and the second is the experimental group name (as defined in the `Group` column of sampleinfo).
 
-***Important: The raw data read-in cannot be done on Randi (likely due to a bug in `sesame`). So We first render the script on local machine with `skip_DM=TRUE`. A `report.html` file will be generated and R objects will be saved to a .RData file. If the .RData already exists in the working directory, will use it for analyses downstream of QC instead of reading from raw data. If you want to restart from reading in raw data, please remove the .RData file from current working directory and render the script again. Then, we upload the .RData and the script to Randi. To run differential methylation tests on Randi, set `skip_DM` to `FALSE` and render the script using the image at [https://hub.docker.com/r/jonalin/cri-methylation-array-report](https://hub.docker.com/r/jonalin/cri-methylation-array-report). ***
+# Practical Steps
+1) Render the script on local machine with `skip_DM: TRUE`. The raw data read-in cannot be done on Randi (likely due to a bug in `sesame` which causes `BiocParallel` errors). A `report.html` file will be generated and R objects will be saved to a .RData file. 
+2) We may need to render the report for several times to find the best tSNE perplexity. To save computing time, the program will try to load from the .RData that already exists in the working directory and use it for analyses downstream of QC instead of reading from raw data. If you want to restart from reading in raw data, please remove the .RData file from current working directory before rendering the script again. 
+3) Upload the .RData and the script to Randi. 
+4) Run differential methylation tests on Randi by setting `skip_DM: FALSE` and render the script using the environmental image at [https://hub.docker.com/r/jonalin/cri-methylation-array-report](https://hub.docker.com/r/jonalin/cri-methylation-array-report).*
 
