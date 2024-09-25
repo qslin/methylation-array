@@ -290,7 +290,7 @@ ggplotly(gp, tooltip = "label")
 
 # Heatmap with unsupervised hierarchical clustering
 
-The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD). NA values were colored black. Probes (rows) were ordered by MAD values.
+The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. NA values were colored black. They were masked beta values due to low confidence in the detection of signals. It’s usually not recommended to use these low-confidence values in the downstream DM analysis. Probes (rows) were ordered by MAD values.
 
 ```{r heatmap save, include=FALSE }
 
