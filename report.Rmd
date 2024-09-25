@@ -1,0 +1,521 @@
+---
+title: "CRI-BIO-XXX: Demostration"
+author: "CRI Bioinformatics Core"
+date: "_`r Sys.Date()`_"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    theme: yeti
+    highlight: tango
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+    number_sections: yes
+    self_contained: true
+params:
+  raw_data_root_folder: "raw_data"
+  sampleinfo: "sampleinfo.csv" # The first column must be Sample_Name whose values are exactly the same as those in metadata files (in .csv format) of the raw data; metadata files should be inside the raw_data_root_folder; the samples in sampleinfo can be a subset of raw data. There must be a Group column indicating sample groups to compare. 
+  platform: "EPICv2"
+  result_folder: "Demostration"
+  remove_bad_samples: TRUE
+  tSNE_perplexity: 3
+  skip_DM: FALSE
+  test_mode: TRUE
+  contrast_pairs: !expr list(
+    c("STK11 Adnexal Tumor", "Adult Granulosa Cell Tumor"),
+    c("STK11 Adnexal Tumor", "Mesothelioma")
+    )
+---
+
+```{r setup, include=FALSE}
+
+library(ggplot2)
+library(plotly)
+library(patchwork)
+library(Rtsne)
+library(matrixStats)
+library(dplyr)
+library(tibble)
+library(stats)
+library(circlize)
+library(dendextend)
+library(VIM)
+library(sesame)
+library(ComplexHeatmap)
+
+sesameDataCache()
+
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+
+if(!dir.exists(params$result_folder)) dir.create(params$result_folder)
+
+```
+
+We use [sesame](https://bioconductor.org/packages/release/bioc/vignettes/sesame/inst/doc/sesame.html) to analyze the data as recommended by Illumina.
+
+We use the standard openSesame workflow to process raw signal data to beta values. A description of the method details can be found in [this article](https://epicom.biomedcentral.com/articles/10.1186/s43682-023-00021-5). Replicate probes are collapsed to mean with the collapseToPfx=TRUE option.
+
+```{r pre-processing}
+
+if (file.exists(paste0(params$result_folder, ".RData"))){
+  cat(paste0(params$result_folder, ".RData"), " already exists in the working directory. Use it for analyses downstream of QC instead of reading from raw data. If you want to restart from reading in raw data, please remove ", paste0(params$result_folder, ".RData"), " from current working directory and knit this script again. ")
+  load(paste0(params$result_folder, ".RData"))
+}else{
+  metadata = list.files(params$raw_data_root_folder, pattern = ".csv", full.names = T, recursive = T)
+  metadata = lapply(metadata, function(x) read.csv(x, skip = 5))
+  metadata = do.call(rbind, metadata)
+
+  sampleinfo = read.csv(params$sampleinfo, na.strings = "")
+
+  coldata = merge(metadata, sampleinfo, by = "Sample_Name")
+  coldata$IDAT = paste(coldata$Sentrix_ID, coldata$Sentrix_Position, sep = "_")
+  coldata = coldata[,c("IDAT", "Sample_Name", names(sampleinfo)[-1])]
+
+  if(nrow(metadata)>nrow(coldata))  cat("There are ", nrow(metadata), " samples found in the raw data folder, but only ", nrow(coldata), " samples have experimental condition records. We will omit samples without any experimental condition record from the downstream analysis. ")
+
+  idats = searchIDATprefixes(params$raw_data_root_folder)
+  
+  sdfs = lapply(idats, readIDATpair, platform = params$platform) %>% setNames(gsub(".*/", "", idats))
+  sdfs = sdfs[coldata$IDAT]
+
+  betas = openSesame(sdfs, collapseToPfx=TRUE)
+  coldata = coldata[na.omit(match(colnames(betas), coldata$IDAT)),]
+}
+
+```
+
+# Experiment design
+
+## Sample information for each IDAT pair
+
+```{r table1}
+if (file.exists(paste0(params$result_folder, ".RData"))){
+  sample_dt
+}else{
+  sample_dt = DT::datatable(coldata, rownames = FALSE)
+  sample_dt
+}
+
+```
+
+## Sample counts per condition
+
+```{r table2}
+if (file.exists(paste0(params$result_folder, ".RData"))){
+  freq_dt
+}else{
+  freq_dt = coldata[, -c(1, 2), drop = F] %>% group_by(across(everything())) %>% summarise(Frequency = n()) %>% ungroup() %>%  as.data.frame() %>% DT::datatable(rownames = FALSE)
+  freq_dt
+}
+```
+
+# QC
+
+## Tables
+
+```{r QC}
+
+if (!file.exists(paste0(params$result_folder, ".RData"))){
+  qcs = list()
+  qcs_df = list()
+  qcs_dt = list()
+  # rankstats = list()
+  # rankstats_df = list()
+  # rankstats_dt = list()
+  for (f in c("detection", "intensity", "numProbes", "channel", "dyeBias", "betas")) {
+    qcs[[f]] = openSesame(sdfs, prep="", func=sesameQC_calcStats, funs=f)
+    qcs_df[[f]] = do.call(rbind, lapply(qcs[[f]], as.data.frame))
+    colnames(qcs_df[[f]]) = qcs[[f]][[1]]@group[[1]][colnames(qcs_df[[f]])]
+    qcs_dt[[f]] = DT::datatable(data = qcs_df[[f]], caption = names(qcs[[f]][[1]]@group), rownames = T)
+    # rankstats[[f]] = lapply(qcs[[f]], sesameQC_rankStats, platform=params$platform_plt)
+    # rankstats_df[[f]] = do.call(rbind, lapply(rankstats[[f]], as.data.frame))
+    # colnames(rankstats_df[[f]]) = rankstats[[f]][[1]]@group[[1]][colnames(rankstats_df[[f]])]
+    # rankstats_dt[[f]] = DT::datatable(data = rankstats_df[[f]], caption = names(rankstats[[f]][[1]]@group), rownames = T)
+  }
+}
+
+htmltools::tagList(setNames(qcs_dt, NULL))
+
+```
+
+## Selected barplots
+
+Please find the full set of barplots in the `QC-Bar` folder.
+
+```{r barplots }
+
+if (!file.exists(paste0(params$result_folder, ".RData"))){
+  if(!dir.exists(paste0(params$result_folder, "/QC-Bar"))) dir.create(paste0(params$result_folder, "/QC-Bar"))
+
+  for (f in c("detection", "intensity", "numProbes", "channel", "dyeBias", "betas")) {
+    h = length(qcs[[f]][[1]]@group[[1]])*250
+    png(paste0(params$result_folder, "/QC-Bar/barplot_", f, ".png"), width = 500, height = h, units = "px")
+    sesameQC_plotBar(qcs[[f]], keys = "") %>% print()
+    dev.off()
+  }
+}
+
+for (f in c("detection", "intensity")) {
+  sesameQC_plotBar(qcs[[f]]) %>% print()
+}
+
+```
+
+```{r RedGrnQQ, include=FALSE }
+
+if (!file.exists(paste0(params$result_folder, ".RData"))){
+  if(!dir.exists(paste0(params$result_folder, "/QC-RedGrnQQ"))) dir.create(paste0(params$result_folder, "/QC-RedGrnQQ"))
+
+  for (f in names(sdfs)) {
+    png(paste0(params$result_folder, "/QC-RedGrnQQ/qqplot_", f, ".png"), width = 500, height = 500, units = "px")
+    sesameQC_plotRedGrnQQ(sdfs[[f]]) %>% print()
+    dev.off()
+  }
+}
+
+```
+
+```{r IntensVsBetas, include=FALSE }
+
+if (!file.exists(paste0(params$result_folder, ".RData"))){
+  if(!dir.exists(paste0(params$result_folder, "/QC-IntensVsBetas"))) dir.create(paste0(params$result_folder, "/QC-IntensVsBetas"))
+
+  for (f in names(sdfs)) {
+    png(paste0(params$result_folder, "/QC-IntensVsBetas/intbetaplot_", f, ".png"), width = 500, height = 500, units = "px")
+    sesameQC_plotIntensVsBetas(sdfs[[f]]) %>% print()
+    dev.off()
+  }
+}
+
+```
+
+## Sample counts per condition after removing bad samples
+
+```{r table3, results='asis'}
+
+if(params$remove_bad_samples){
+  samples_rm <- rownames(qcs_df$detection)[qcs_df$detection[grep("% Detection Success\\s+$",names(qcs_df$detection))]<0.4]
+  
+  if (length(samples_rm)>0) {
+    coldata <- coldata[!coldata$IDAT %in% samples_rm,]
+    betas <- betas[,!colnames(betas) %in% samples_rm]
+    cat("Bad samples (detection success rate < 40%) to remove:", paste(samples_rm, collapse = ", "))
+    
+    coldata[, -c(1, 2), drop = F] %>% group_by(across(everything())) %>% summarise(Frequency = n()) %>% ungroup() %>%  as.data.frame() %>% DT::datatable(rownames = FALSE)
+  }else{
+    cat("There is no bad sample. All samples have a detection success rate >= 40%.")
+  }
+}else{
+  samples_rm <- rownames(qcs_df$detection)[qcs_df$detection[grep("% Detection Success\\s+$",names(qcs_df$detection))]<0.4]
+  if (length(samples_rm)>0) {
+    cat("Potential bad samples (detection success rate < 40%) to remove:", paste(samples_rm, collapse = ", "), "<br>")
+    cat("For analyses in this report, we use all samples. ")
+  }else{
+    cat("There is no bad sample. All samples have a detection success rate >= 40%.")
+  }
+}
+
+```
+
+```{r save env}
+if (!file.exists(paste0(params$result_folder, ".RData"))) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
+```
+
+# t-SNE plots
+
+For the t-SNE analysis below, we applied perplexity = `r params$tSNE_perplexity`. Note that probes with bad detection p-values were masked as NAs in the QC steps. These probes were removed in the t-SNE analysis since they were unacceptable as inputs for t-SNE. `r nrow(na.omit(betas))` out of `r nrow(betas)` CpG loci were removed here.
+
+## Using all CpG loci (probes)
+
+```{r t-SNE, include=FALSE}
+
+tsne_plot <- function(tsne_result, coldata, title){
+  tsne_data <- data.frame(
+    tSNE1 = tsne_result$Y[,1],
+    tSNE2 = tsne_result$Y[,2]
+  )
+  plot_data <- cbind(tsne_data, coldata[,-1])
+  if (ncol(plot_data)==4) {
+    gp <- ggplot(plot_data, aes(x = tSNE1, y = tSNE2, label = Sample_Name, color = !!sym(names(plot_data)[4]))) +
+      geom_point(size = 2) +
+      labs(title = title) +
+      theme_minimal() +
+      scale_color_brewer(palette = "Set2")
+  }else if (ncol(plot_data)>4) {
+    gp <- ggplot(plot_data, aes(x = tSNE1, y = tSNE2, label = Sample_Name, color = !!sym(names(plot_data)[4]), shape = !!sym(names(plot_data)[5]))) +
+      geom_point(size = 2) +
+      labs(title = title) +
+      theme_minimal() +
+      scale_color_brewer(palette = "Set2")
+  }else{
+    gp <- ggplot(plot_data, aes(x = tSNE1, y = tSNE2, label = Sample_Name)) +
+      geom_point(size = 2) +
+      labs(title = title) +
+      theme_minimal() +
+      scale_color_brewer(palette = "Set2")
+  }
+  return(gp)
+}
+
+betas_clean <- na.omit(betas)
+set.seed(123)  # Set a seed for reproducibility
+tsne_result <- Rtsne(t(betas_clean), dims = 2, perplexity = params$tSNE_perplexity, verbose = TRUE)
+gp <- tsne_plot(tsne_result, coldata, "t-SNE clustering")
+
+```
+
+```{r plot out, fig.width=8, results='asis'}
+ggplotly(gp, tooltip = "label")
+```
+
+## Using the top 10k most variable CpG loci (probes)
+
+```{r t-SNE top, include=FALSE}
+
+top10k <- rownames(betas_clean)[order(rowVars(betas_clean), decreasing=TRUE)] %>% head(10000)
+betas_clean_top <- betas_clean[top10k,]
+
+set.seed(123)  # Set a seed for reproducibility
+tsne_result <- Rtsne(t(betas_clean_top), dims = 2, perplexity = params$tSNE_perplexity, verbose = TRUE)
+
+gp <- tsne_plot(tsne_result, coldata, "t-SNE clustering")
+
+```
+
+```{r plot out top, fig.width=8, results='asis'}
+ggplotly(gp, tooltip = "label")
+```
+
+# Heatmap with unsupervised hierarchical clustering
+
+The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD). NA values were colored black. Probes (rows) were ordered by MAD values.
+
+```{r heatmap save, include=FALSE }
+
+mad_values <- apply(betas, 1, mad, na.rm = TRUE)  # Calculate MAD, ignoring NAs
+betas.sel <- betas[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+
+sample_anno <- coldata[,-c(1,2), drop = FALSE]
+sample_anno[] = lapply(sample_anno, as.factor)
+annotation_colors <- lapply(sample_anno, function(x) {
+  colors <- c(RColorBrewer::brewer.pal(8, "Set2"), RColorBrewer::brewer.pal(9, "Set1"))[1:length(levels(x))]
+  setNames(colors[seq_along(levels(x))], levels(x))
+})
+
+pdf(file.path(params$result_folder, "heatmap.pdf"), width = 8, height = 16)
+hm <- Heatmap(
+  betas.sel,
+  name = "Beta Values",  
+  col = colorRamp2(c(0, 0.5, 1), c("blue", "whitesmoke", "red")),  
+  na_col = "black",  
+  show_row_names = FALSE,
+  cluster_rows = FALSE,
+  clustering_method_columns = "ward.D2",  # Specify clustering method for columns
+  use_raster = TRUE,
+  top_annotation = HeatmapAnnotation(
+    df = sample_anno,
+    col = annotation_colors,  # Assign colors automatically generated for each factor
+    annotation_name_side = "left"  # Position of the annotation name
+  )
+)
+draw(hm)
+dev.off()
+
+```
+
+```{r heatmap plot, results='asis'}
+cat(paste0('<iframe src="', file.path(params$result_folder, "heatmap.pdf"), '" width="100%" height="600px"></iframe>'))
+```
+
+# Differentially methylated probes and regions
+
+## Differentially methylated probes (DMPs)
+
+```{r DE-test, results='asis'}
+
+if(!params$skip_DM) {
+  rownames(coldata) <- coldata$IDAT
+
+  pval = 0.05
+  eff_thres = 0.2
+  seg_fdr = 0.05
+  
+  if(!exists("smry")) { 
+    smry = list()
+    rerun_DML = TRUE
+  }else{
+    rerun_DML = FALSE
+  }
+  test_result = list()
+  test_result_sig = list()
+  test_result_dt = list()
+  merged = list()
+  merged_sig = list()
+  merged_dt = list()
+  merged_plt = list()
+  
+  for(comp in params$contrast_pairs){
+    if(nrow(coldata[coldata$Group %in% comp[1],])==1 && nrow(coldata[coldata$Group %in% comp[2],])==1) {
+      replicates = FALSE
+    }else{
+      replicates = TRUE
+    }
+    
+    betas.sub = betas[,coldata$Group %in% comp]
+    coldata.sub = coldata[coldata$Group %in% comp,]
+    
+    coldata.sub$Group <- factor(coldata.sub$Group, levels = comp)
+    
+    betas_ok = (checkLevels(betas.sub, coldata.sub$Group))
+    comp_name = paste(comp, collapse = " vs ")
+    cat("<h4>", comp_name, "</h4>")
+    cat("We removed probes missing a non-NA value for any factor level (", paste0(unique(coldata.sub$Group), collapse = " or "), " in this contrast). The remaining ", sum(betas_ok), " out of ", nrow(betas.sub), " probes were used for DM analysis.", sep = "")
+  
+    betas.sub = betas.sub[betas_ok,]
+    if(params$test_mode) betas.sub = betas.sub[1:2000,] # for testing
+    
+    if(rerun_DML) smry[[comp_name]] = DML(betas.sub, fm = ~Group, meta = coldata.sub)
+    test_result[[comp_name]] = summaryExtractTest(smry[[comp_name]])
+    
+    if(replicates) {
+      test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[5]] < pval, .[[7]] > eff_thres) %>% arrange(desc(.[[7]]))
+    }else{
+      test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[7]] > eff_thres) %>% arrange(desc(.[[7]]))
+    }
+    
+    test_result_dt[[comp_name]] = DT::datatable(data = test_result_sig[[comp_name]][1:100,], caption = paste(comp_name, "Top 100 Differential Methylated CpGs"), rownames = F)
+  
+    if(replicates) {
+      cat("There were ", nrow(test_result_sig[[comp_name]]), " differentially methylated CpGs with a p-value < ", pval, " and an effective size > ", eff_thres, ".<br>", sep = "")
+    }else{
+      cat("***Note that there was no replicate for either ", comp[1], " or ", comp[2], ". So P-value was not calculated for this comparison. All the ", nrow(test_result_sig[[comp_name]]), " CpGs with an effective size > ", eff_thres, " were saved to the results tables.***<br>", sep = "")
+    }
+    cat("Up-regulated in", comp[2], ":", nrow(test_result_sig[[comp_name]] %>% filter(.[[3]]>0)), "<br>")
+    cat("Down-regulated in", comp[2], ":", nrow(test_result_sig[[comp_name]] %>% filter(.[[3]]<0)), "<br>")
+  
+    if(!dir.exists(file.path(params$result_folder, "DMP/"))) dir.create(file.path(params$result_folder, "DMP/"), recursive = TRUE)
+    write.csv(test_result_sig[[comp_name]], file = paste0(params$result_folder, "/DMP/DMP_", gsub("\\s", "_", comp_name), ".csv"))
+    
+    merged[[comp_name]] = DMR(betas.sub, smry[[comp_name]], colnames(attr(smry[[comp_name]], "model.matrix"))[2]) # merge CpGs to regions
+    if(replicates) {
+      merged_sig[[comp_name]] = merged[[comp_name]] %>% dplyr::filter(Seg_Pval_adj < seg_fdr) %>% arrange(desc(abs(Seg_Est)))
+    }else{
+      merged_sig[[comp_name]] = merged[[comp_name]] %>% arrange(desc(abs(Seg_Est)))
+    }
+    merged_dt[[comp_name]] = DT::datatable(data = unique(merged_sig[[comp_name]][grep("chr",merged_sig[[comp_name]]$Seg_Chrm),1:7]), caption = paste(comp_name, "Differential Methylated Regions (DMRs)"), rownames = F)
+    merged_plt[[comp_name]] = unique(merged_sig[[comp_name]][grep("chr",merged_sig[[comp_name]]$Seg_Chrm),1:7])
+  
+    if(!dir.exists(file.path(params$result_folder, "DMR/"))) dir.create(file.path(params$result_folder, "DMR/"), recursive = TRUE)
+    write.csv(merged_sig[[comp_name]], file = paste0(params$result_folder, "/DMR/DMR_", gsub("\\s", "_", comp_name), ".csv"))
+  }
+}
+
+```
+
+### Top 100 significant DMPs
+
+The tables below show top 100 significant DMPs. Please find the full significant DMP lists in the `DMP` folder.
+
+**Note:** With the exception of the Intercept, there are four groups of columns, each starting with "Est_", "Pval_", "FPval_", and "Eff_" as prefix. Here are what they represent:
+
+- Est: The slope estimate (aka the β coefficient, not to be confused with the DNA methylation β-value though) for continuous variable. DNA methylation difference of the current level with respect to the reference level for nominal contrast variables. There is a special column named Est_X.Intercept. It corresponds to the base-level methylation of the reference.
+
+- Pval: The unadjusted p-values of t-testing the slope. This represents the statistical significance of the methylation difference. The Pval_X.Intercept tests whether the reference level is significantly different from zero.
+
+- FPval: The unadjusted p-value of the F-test contrasting the full model against a reduced model with the labeled contrast variable held out. Note that "Pval_" and "FPval_" are equivalent when the contrast variable is a 2-level factor, i.e., in the case of a pairwise comparison.
+
+- Eff: The effect size of each normial contrast variable. This is equivalent to the maximum slope subtracted by the minimum level including the reference level (0).
+
+```{r DMP tables}
+if(!params$skip_DM) {
+  htmltools::tagList(setNames(test_result_dt, NULL))
+}
+```
+
+### Barplots of significant DMPs
+
+```{r barplot-function}
+DM_barplots <- function(plot_data, title){
+  space = (max(plot_data$Up)-min(plot_data$Down))*0.15/2
+  bp_ratio = nrow(plot_data)/(max(plot_data$Up)-min(plot_data$Down))
+  ggplot(plot_data, aes(x = Contrast)) +
+    geom_bar(aes(y = Up, fill = "Up"), stat = "identity", position = "identity") +
+    geom_bar(aes(y = -Down, fill = "Down"), stat = "identity", position = "identity") +
+    geom_text(aes(label = Up, y = Up), vjust = -0.5) +
+    geom_text(aes(label = Down, y = -Down), vjust = 1.5) +
+    scale_fill_manual(values = c("Up" = "#FC8D62", "Down" = "#66C2A5"),
+                      breaks = c("Up", "Down"),
+                      guide = guide_legend(title = "Regulation")) +
+    labs(title = title) +
+    theme_minimal() +
+    theme(panel.grid.major.x = element_blank(),
+          panel.border = element_rect(colour = "black", fill = NA),
+          legend.text = element_text(size = 12),
+          legend.title = element_text(size = 12),
+          axis.text.x = element_text(angle = 90, hjust = 1),
+          axis.text = element_text(size = 12)) +
+    ylim(-max(plot_data$Down)-space,max(plot_data$Up)+space) +
+    coord_fixed(ratio = bp_ratio)
+}
+```
+
+```{r barplot-DMPs}
+if(!params$skip_DM) {
+  plot_data <- lapply(test_result_sig, function(x) table(as.vector(x[[3]]>0))) %>% do.call(rbind, .)
+  colnames(plot_data) <- c("Down","Up")
+  plot_data <- rownames_to_column(as.data.frame(plot_data), var = "Contrast")
+  plot_data$Contrast <- factor(plot_data$Contrast, levels = names(test_result_sig))
+  DM_barplots(plot_data, "Number of DMPs")
+}
+```
+
+### Volcano plots of all CpGs
+```{r volcano}
+if(!params$skip_DM) {
+  for(n in names(test_result)){
+    p <- ggplot(test_result[[n]]) + geom_point(aes(!!sym(names(test_result[[n]])[3]), -log10(!!sym(names(test_result[[n]])[5])))) + ggtitle(n)
+    print(p)
+  }
+}  
+```
+
+## Differentially methylated regions (DMRs)
+
+### Tables of significant DMRs
+
+The tables below show unique significant DMRs. Non-chromosome CpGs were not shown. Please find the full significant DMR lists in the `DMR` folder.
+
+```{r DMR tables}
+if(!params$skip_DM) {
+  htmltools::tagList(setNames(merged_dt, NULL))
+}
+```
+
+### Barplots of significant DMRs
+
+```{r barplot-DMRs}
+if(!params$skip_DM) {
+  plot_data <- lapply(merged_plt, function(x) table(as.vector(x$Seg_Est>0))) %>% do.call(rbind, .)
+  colnames(plot_data) <- c("Down","Up")
+  plot_data <- rownames_to_column(as.data.frame(plot_data), var = "Contrast")
+  plot_data$Contrast <- factor(plot_data$Contrast, levels = names(merged_plt))
+  DM_barplots(plot_data, "Number of DMRs")
+}
+```
+
+### Volcano plots of all CpGs-merged regions
+
+```{r volcano regions}
+if(!params$skip_DM) {
+  for(n in names(merged)){
+    p <- ggplot(merged[[n]]) + geom_point(aes(Seg_Est, -log10(Seg_Pval_adj))) + ggtitle(n)
+    print(p)
+  }
+}
+```
+
+```{r save DML results}
+if(!params$skip_DM && !params$test_mode) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
+```

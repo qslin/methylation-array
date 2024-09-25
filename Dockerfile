@@ -17,7 +17,7 @@ RUN R -e "install.packages(c('BiocManager'), repos='https://cloud.r-project.org/
 RUN R -e "BiocManager::install(c('readxl', 'ggplot2', 'plotly', 'patchwork', 'Rtsne', 'matrixStats', 'dplyr', 'sesame', 'DT'))"
 RUN R -e "BiocManager::install(c('rmarkdown', 'pals'))"
 RUN apt-get update && apt-get install -y cmake
-RUN R -e "BiocManager::install(c('circlize','dendextend','VIM'))"
+RUN R -e "BiocManager::install(c('circlize','ComplexHeatmap'))"
 
 # Expose the default RStudio port
 EXPOSE 8787
