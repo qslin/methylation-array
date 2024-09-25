@@ -20,6 +20,7 @@ params:
   platform: "EPICv2"
   result_folder: "Demostration"
   remove_bad_samples: TRUE
+  unmask: FALSE
   tSNE_perplexity: 3
   skip_DM: FALSE
   test_mode: TRUE
@@ -81,6 +82,7 @@ if (file.exists(paste0(params$result_folder, ".RData"))){
   sdfs = sdfs[coldata$IDAT]
 
   betas = openSesame(sdfs, collapseToPfx=TRUE)
+  betas_unmask = openSesame(sdfs, collapseToPfx=TRUE, mask=FALSE)
   coldata = coldata[na.omit(match(colnames(betas), coldata$IDAT)),]
 }
 
@@ -225,11 +227,19 @@ if (!file.exists(paste0(params$result_folder, ".RData"))) save(list = ls()[-grep
 
 # t-SNE plots
 
-For the t-SNE analysis below, we applied perplexity = `r params$tSNE_perplexity`. Note that probes with bad detection p-values were masked as NAs in the QC steps. These probes were removed in the t-SNE analysis since they were unacceptable as inputs for t-SNE. `r nrow(na.omit(betas))` out of `r nrow(betas)` CpG loci were removed here.
+For the t-SNE analysis below, we applied perplexity = `r params$tSNE_perplexity`. 
+
+```{r t-SNE notes, results='asis'}
+if(params$unmask){
+  cat("Note that we used a probe matrix without masking bad detection p-values for the t-SNE analysis. `r nrow(betas_unmask)` CpG loci were used here.")
+}else{
+  cat("Note that probes with bad detection p-values were masked as NAs in the QC steps. These probes were removed in the t-SNE analysis since they were unacceptable as inputs for t-SNE. `r nrow(na.omit(betas))` out of `r nrow(betas)` CpG loci were removed here.")
+}
+```
 
 ## Using all CpG loci (probes)
 
-```{r t-SNE, include=FALSE}
+```{r t-SNE function, include=FALSE}
 
 tsne_plot <- function(tsne_result, coldata, title){
   tsne_data <- data.frame(
@@ -259,20 +269,28 @@ tsne_plot <- function(tsne_result, coldata, title){
   return(gp)
 }
 
-betas_clean <- na.omit(betas)
+```
+
+```{r t-SNE all, include=FALSE}
+
+if(params$unmask){
+  betas_clean <- betas_unmask
+}else{
+  betas_clean <- na.omit(betas)
+}
 set.seed(123)  # Set a seed for reproducibility
 tsne_result <- Rtsne(t(betas_clean), dims = 2, perplexity = params$tSNE_perplexity, verbose = TRUE)
 gp <- tsne_plot(tsne_result, coldata, "t-SNE clustering")
 
 ```
 
-```{r plot out, fig.width=8, results='asis'}
+```{r plot out all, fig.width=8, results='asis'}
 ggplotly(gp, tooltip = "label")
 ```
 
 ## Using the top 10k most variable CpG loci (probes)
 
-```{r t-SNE top, include=FALSE}
+```{r t-SNE top10k, include=FALSE}
 
 top10k <- rownames(betas_clean)[order(rowVars(betas_clean), decreasing=TRUE)] %>% head(10000)
 betas_clean_top <- betas_clean[top10k,]
@@ -284,18 +302,29 @@ gp <- tsne_plot(tsne_result, coldata, "t-SNE clustering")
 
 ```
 
-```{r plot out top, fig.width=8, results='asis'}
+```{r plot out top10k, fig.width=8, results='asis'}
 ggplotly(gp, tooltip = "label")
 ```
 
 # Heatmap with unsupervised hierarchical clustering
 
-The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. NA values were colored black. They were masked beta values due to low confidence in the detection of signals. It’s usually not recommended to use these low-confidence values in the downstream DM analysis. Probes (rows) were ordered by MAD values.
+```{r heatmap notes, results='asis'}
+if(params$unmask){
+  cat("Note that we used a probe matrix without masking bad detection p-values for the heatmap and unsupervised hierarchical clustering. The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. Probes (rows) were ordered by MAD values. ")
+}else{
+  cat("The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. NA values were colored black. They were masked beta values due to low confidence in the detection of signals. It’s usually not recommended to use these low-confidence values in the downstream DM analysis. Probes (rows) were ordered by MAD values.")
+}
+```
 
 ```{r heatmap save, include=FALSE }
 
-mad_values <- apply(betas, 1, mad, na.rm = TRUE)  # Calculate MAD, ignoring NAs
-betas.sel <- betas[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+if(params$unmask){
+  mad_values <- apply(betas_unmask, 1, mad)  # Calculate MAD, ignoring NAs
+  betas.sel <- betas_unmask[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+}else{
+  mad_values <- apply(betas, 1, mad, na.rm = TRUE)  # Calculate MAD, ignoring NAs
+  betas.sel <- betas[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+}
 
 sample_anno <- coldata[,-c(1,2), drop = FALSE]
 sample_anno[] = lapply(sample_anno, as.factor)

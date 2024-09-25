@@ -8,6 +8,7 @@ Before rendering, check the following parameters:
 - `platform`: e.g. "EPICv2". Please check the other availabel platforms at [https://bioconductor.org/packages/release/bioc/vignettes/sesame/inst/doc/sesame.html](https://bioconductor.org/packages/release/bioc/vignettes/sesame/inst/doc/sesame.html)
 - `result_folder`: name of the folder to save results; will also be the name of `.RData` output.
 - `remove_bad_samples`: whether to remove samples with <40% success detection rate.
+- `unmask`: whether to use unmasked beta values for tSNE and heatmap with clustering.
 - `tSNE_perplexity`: perplexity to use in tSNE.
 - `skip_DM`: whether to skip the differential methylation test. This must be TRUE when rendering the script on local machine with a relatively low memory.
 - `test_mode`: whether to test the script using the first 2000 probes of each sample only and not to overwrite current .RData output; usually used on a local machine.
