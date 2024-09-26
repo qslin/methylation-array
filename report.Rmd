@@ -470,13 +470,13 @@ DM_barplots <- function(plot_data, title){
   space = (max(plot_data$Up)-min(plot_data$Down))*0.15/2
   bp_ratio = nrow(plot_data)/(max(plot_data$Up)-min(plot_data$Down))
   ggplot(plot_data, aes(x = Contrast)) +
-    geom_bar(aes(y = Up, fill = "Up"), stat = "identity", position = "identity") +
-    geom_bar(aes(y = -Down, fill = "Down"), stat = "identity", position = "identity") +
+    geom_bar(aes(y = Up, fill = "Hypermethylation"), stat = "identity", position = "identity") +
+    geom_bar(aes(y = -Down, fill = "Hypomethylation"), stat = "identity", position = "identity") +
     geom_text(aes(label = Up, y = Up), vjust = -0.5) +
     geom_text(aes(label = Down, y = -Down), vjust = 1.5) +
-    scale_fill_manual(values = c("Up" = "#FC8D62", "Down" = "#66C2A5"),
-                      breaks = c("Up", "Down"),
-                      guide = guide_legend(title = "Regulation")) +
+    scale_fill_manual(values = c("Hypermethylation" = "#FC8D62", "Hypomethylation" = "#66C2A5"),
+                      breaks = c("Hypermethylation", "Hypomethylation"),
+                      guide = guide_legend(title = "Methylation Status")) +
     labs(title = title) +
     theme_minimal() +
     theme(panel.grid.major.x = element_blank(),
@@ -493,7 +493,7 @@ DM_barplots <- function(plot_data, title){
 ```{r barplot-DMPs}
 if(!params$skip_DM) {
   plot_data <- lapply(test_result_sig, function(x) table(as.vector(x[[3]]>0))) %>% do.call(rbind, .)
-  colnames(plot_data) <- c("Down","Up")
+  colnames(plot_data) <- c("Hypomethylation","Hypermethylation")
   plot_data <- rownames_to_column(as.data.frame(plot_data), var = "Contrast")
   plot_data$Contrast <- factor(plot_data$Contrast, levels = names(test_result_sig))
   DM_barplots(plot_data, "Number of DMPs")
@@ -527,7 +527,7 @@ if(!params$skip_DM) {
 ```{r barplot-DMRs}
 if(!params$skip_DM) {
   plot_data <- lapply(merged_plt, function(x) table(as.vector(x$Seg_Est>0))) %>% do.call(rbind, .)
-  colnames(plot_data) <- c("Down","Up")
+  colnames(plot_data) <- c("Hypomethylation","Hypermethylation")
   plot_data <- rownames_to_column(as.data.frame(plot_data), var = "Contrast")
   plot_data$Contrast <- factor(plot_data$Contrast, levels = names(merged_plt))
   DM_barplots(plot_data, "Number of DMRs")
