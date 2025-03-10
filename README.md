@@ -13,6 +13,8 @@ Before rendering, check the following parameters:
 - `skip_DM`: whether to skip the differential methylation test. This must be TRUE when rendering the script on local machine with a relatively low memory.
 - `test_mode`: whether to test the script using the first 2000 probes of each sample only and not to overwrite current .RData output; usually used on a local machine.
 - `contrast_pairs`: a list of vectors; each vector has two character strings, where is the first one is the reference group name and the second is the experimental group name (as defined in the `Group` column of sampleinfo).
+- `species`: currently support human, mouse, and rat. 
+- `ora_fdr_thres`: FDR cutoff used in gene-set over-representation analysis.
 
 # Practical Steps
 1) Render the script on local machine with `skip_DM: TRUE`. The raw data read-in cannot be done on Randi (likely due to a bug in `sesame` which causes `BiocParallel` errors). A `report.html` file will be generated and R objects will be saved to a `<result_folder>.RData` file. 
