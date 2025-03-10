@@ -28,6 +28,8 @@ params:
     c("STK11 Adnexal Tumor", "Adult Granulosa Cell Tumor"),
     c("STK11 Adnexal Tumor", "Mesothelioma")
     )
+  species: "human"
+  ora_fdr_thres: 0.05
 ---
 
 ```{r setup, include=FALSE}
@@ -45,6 +47,10 @@ library(dendextend)
 library(VIM)
 library(sesame)
 library(ComplexHeatmap)
+library(ggrepel)
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(clusterProfiler)
 
 sesameDataCache()
 
@@ -54,9 +60,11 @@ if(!dir.exists(params$result_folder)) dir.create(params$result_folder)
 
 ```
 
+# Experiment design
+
 We use [sesame](https://bioconductor.org/packages/release/bioc/vignettes/sesame/inst/doc/sesame.html) to analyze the data as recommended by Illumina.
 
-We use the standard openSesame workflow to process raw signal data to beta values. A description of the method details can be found in [this article](https://epicom.biomedcentral.com/articles/10.1186/s43682-023-00021-5). Replicate probes are collapsed to mean with the collapseToPfx=TRUE option.
+We use the standard openSesame workflow to process raw signal data to beta values. A description of the method details can be found in [this article](https://epicom.biomedcentral.com/articles/10.1186/s43682-023-00021-5). 
 
 ```{r pre-processing}
 
@@ -81,8 +89,8 @@ if (file.exists(paste0(params$result_folder, ".RData"))){
   sdfs = lapply(idats, readIDATpair, platform = params$platform) %>% setNames(gsub(".*/", "", idats))
   sdfs = sdfs[coldata$IDAT]
 
-  betas = openSesame(sdfs, collapseToPfx=TRUE)
-  betas_unmask = openSesame(sdfs, collapseToPfx=TRUE, mask=FALSE)
+  betas = openSesame(sdfs, collapseToPfx=FALSE)
+  betas_unmask = openSesame(sdfs, collapseToPfx=FALSE, mask=FALSE)
   coldata = coldata[na.omit(match(colnames(betas), coldata$IDAT)),]
 }
 
@@ -203,6 +211,7 @@ if(params$remove_bad_samples){
   if (length(samples_rm)>0) {
     coldata <- coldata[!coldata$IDAT %in% samples_rm,]
     betas <- betas[,!colnames(betas) %in% samples_rm]
+    betas_unmask <- betas_unmask[,!colnames(betas_unmask) %in% samples_rm]
     cat("Bad samples (detection success rate < 40%) to remove:", paste(samples_rm, collapse = ", "))
     
     coldata[, -c(1, 2), drop = F] %>% group_by(across(everything())) %>% summarise(Frequency = n()) %>% ungroup() %>%  as.data.frame() %>% DT::datatable(rownames = FALSE)
@@ -231,9 +240,9 @@ For the t-SNE analysis below, we applied perplexity = `r params$tSNE_perplexity`
 
 ```{r t-SNE notes, results='asis'}
 if(params$unmask){
-  cat("Note that we used a probe matrix without masking bad detection p-values for the t-SNE analysis. `r nrow(betas_unmask)` CpG loci were used here.")
+  cat("Note that we used a probe matrix without masking bad detection p-values for the t-SNE analysis. ", nrow(betas_unmask), " CpG loci were used here.")
 }else{
-  cat("Note that probes with bad detection p-values were masked as NAs in the QC steps. These probes were removed in the t-SNE analysis since they were unacceptable as inputs for t-SNE. `r nrow(na.omit(betas))` out of `r nrow(betas)` CpG loci were removed here.")
+  cat("Note that probes with bad detection p-values were masked as NAs in the QC steps. These probes were removed in the t-SNE analysis since they were unacceptable as inputs for t-SNE. ", nrow(na.omit(betas)), " out of ", nrow(betas), " CpG loci were removed here.")
 }
 ```
 
@@ -310,9 +319,9 @@ ggplotly(gp, tooltip = "label")
 
 ```{r heatmap notes, results='asis'}
 if(params$unmask){
-  cat("Note that we used a probe matrix without masking bad detection p-values for the heatmap and unsupervised hierarchical clustering. The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. Probes (rows) were ordered by MAD values. ")
+  cat("Note that we used a probe matrix without masking bad detection p-values for the heatmap and unsupervised hierarchical clustering (Ward’s method). The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. Probes were also clustered with the Ward's method. ")
 }else{
-  cat("The unsupervised hierarchical clustering was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. NA values were colored black. They were masked beta values due to low confidence in the detection of signals. It’s usually not recommended to use these low-confidence values in the downstream DM analysis. Probes (rows) were ordered by MAD values.")
+  cat("The unsupervised hierarchical clustering (Ward’s method) was done using the top 10k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. Some beta values were masked due to low confidence in the detection of signals. It’s usually not recommended to use these low-confidence values in the downstream DM analysis. For heatmap visualization purpose, we removed any probes containing an NA value. Probes were then clustered with the Ward's method. ")
 }
 ```
 
@@ -324,6 +333,8 @@ if(params$unmask){
 }else{
   mad_values <- apply(betas, 1, mad, na.rm = TRUE)  # Calculate MAD, ignoring NAs
   betas.sel <- betas[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+  # betas.sel <- imputeBetas(betas.sel) # CANNOT do imputation since it turned out to alter the relationship between samples.
+  betas.sel <- na.omit(betas.sel)
 }
 
 sample_anno <- coldata[,-c(1,2), drop = FALSE]
@@ -340,8 +351,9 @@ hm <- Heatmap(
   col = colorRamp2(c(0, 0.5, 1), c("blue", "whitesmoke", "red")),  
   na_col = "black",  
   show_row_names = FALSE,
-  cluster_rows = FALSE,
+  cluster_rows = TRUE,
   clustering_method_columns = "ward.D2",  # Specify clustering method for columns
+  clustering_method_rows = "ward.D2",
   use_raster = TRUE,
   top_annotation = HeatmapAnnotation(
     df = sample_anno,
@@ -384,10 +396,12 @@ if(!params$skip_DM) {
   merged_sig = list()
   merged_dt = list()
   merged_plt = list()
+  warning_flag = c()
   
   for(comp in params$contrast_pairs){
     if(nrow(coldata[coldata$Group %in% comp[1],])==1 && nrow(coldata[coldata$Group %in% comp[2],])==1) {
       replicates = FALSE
+      warning_flag <- c(warning_flag, paste(comp, collapse = " vs "))
     }else{
       replicates = TRUE
     }
@@ -429,9 +443,9 @@ if(!params$skip_DM) {
     
     merged[[comp_name]] = DMR(betas.sub, smry[[comp_name]], colnames(attr(smry[[comp_name]], "model.matrix"))[2]) # merge CpGs to regions
     if(replicates) {
-      merged_sig[[comp_name]] = merged[[comp_name]] %>% dplyr::filter(Seg_Pval_adj < seg_fdr) %>% arrange(desc(abs(Seg_Est)))
+      merged_sig[[comp_name]] = merged[[comp_name]] %>% dplyr::filter(abs(Seg_Est) > eff_thres) %>% dplyr::filter(Seg_Pval_adj < seg_fdr) %>% arrange(desc(abs(Seg_Est)))
     }else{
-      merged_sig[[comp_name]] = merged[[comp_name]] %>% arrange(desc(abs(Seg_Est)))
+      merged_sig[[comp_name]] = merged[[comp_name]] %>% dplyr::filter(abs(Seg_Est) > eff_thres) %>% arrange(desc(abs(Seg_Est)))
     }
     merged_dt[[comp_name]] = DT::datatable(data = unique(merged_sig[[comp_name]][grep("chr",merged_sig[[comp_name]]$Seg_Chrm),1:7]), caption = paste(comp_name, "Differential Methylated Regions (DMRs)"), rownames = F)
     merged_plt[[comp_name]] = unique(merged_sig[[comp_name]][grep("chr",merged_sig[[comp_name]]$Seg_Chrm),1:7])
@@ -467,13 +481,13 @@ if(!params$skip_DM) {
 
 ```{r barplot-function}
 DM_barplots <- function(plot_data, title){
-  space = (max(plot_data$Up)-min(plot_data$Down))*0.15/2
-  bp_ratio = nrow(plot_data)/(max(plot_data$Up)-min(plot_data$Down))
+  space = (max(plot_data$Hypermethylation)-min(plot_data$Hypomethylation))*0.15/2
+  bp_ratio = nrow(plot_data)/(max(plot_data$Hypermethylation)-min(plot_data$Hypomethylation))
   ggplot(plot_data, aes(x = Contrast)) +
-    geom_bar(aes(y = Up, fill = "Hypermethylation"), stat = "identity", position = "identity") +
-    geom_bar(aes(y = -Down, fill = "Hypomethylation"), stat = "identity", position = "identity") +
-    geom_text(aes(label = Up, y = Up), vjust = -0.5) +
-    geom_text(aes(label = Down, y = -Down), vjust = 1.5) +
+    geom_bar(aes(y = Hypermethylation, fill = "Hypermethylation"), stat = "identity", position = "identity") +
+    geom_bar(aes(y = -Hypomethylation, fill = "Hypomethylation"), stat = "identity", position = "identity") +
+    geom_text(aes(label = Hypermethylation, y = Hypermethylation), vjust = -0.5) +
+    geom_text(aes(label = Hypomethylation, y = -Hypomethylation), vjust = 1.5) +
     scale_fill_manual(values = c("Hypermethylation" = "#FC8D62", "Hypomethylation" = "#66C2A5"),
                       breaks = c("Hypermethylation", "Hypomethylation"),
                       guide = guide_legend(title = "Methylation Status")) +
@@ -481,11 +495,13 @@ DM_barplots <- function(plot_data, title){
     theme_minimal() +
     theme(panel.grid.major.x = element_blank(),
           panel.border = element_rect(colour = "black", fill = NA),
-          legend.text = element_text(size = 12),
-          legend.title = element_text(size = 12),
+          legend.text = element_text(size = 11),
+          legend.title = element_text(size = 11),
           axis.text.x = element_text(angle = 90, hjust = 1),
-          axis.text = element_text(size = 12)) +
-    ylim(-max(plot_data$Down)-space,max(plot_data$Up)+space) +
+          axis.text = element_text(size = 11),
+          axis.text.y = element_blank(),   # Remove y-axis labels
+          axis.title.y = element_blank()) +
+    ylim(-max(plot_data$Hypomethylation)-space*1.5,max(plot_data$Hypermethylation)+space*1.5) +
     coord_fixed(ratio = bp_ratio)
 }
 ```
@@ -501,16 +517,70 @@ if(!params$skip_DM) {
 ```
 
 ### Volcano plots of all CpGs
+
+```{r volcano-function}
+plot_volcano_dmp <- function(title, res, p.thres, fc.thres) {
+  res <- res %>% as.data.frame()
+  res_up <- res[res[, 3] > fc.thres & res[, 5] < p.thres, ] %>% na.omit()
+  res_down <- res[res[, 3] < -fc.thres & res[, 5] < p.thres, ] %>% na.omit()
+  # Prepare the base plot
+  vplot <- ggplot(res, aes(.data[[names(res)[3]]], -log10(.data[[names(res)[5]]]), text = Probe_ID)) +
+    geom_point(size = 2) +
+    geom_hline(yintercept = -log10(p.thres), linetype = "longdash", colour = "grey", size = 1) +
+    geom_vline(xintercept = fc.thres, linetype = "longdash", colour = "#BE684D", size = 1) +
+    geom_vline(xintercept = -fc.thres, linetype = "longdash", colour = "#2C467A", size = 1) +
+    labs(title = title, subtitle = "Volcano plot") +
+    ylab("-log10 P") +
+    xlab("DNA Methylation Difference") +
+    theme_bw() +
+    scale_x_continuous(limits = c(-0.8, 0.8), oob = scales::squish)
+  
+  # Highlight points based on thresholds
+  if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(x = .data[[names(res_up)[3]]], y = -log10(.data[[names(res_up)[5]]])), color = 'red') }
+  if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(x = .data[[names(res_down)[3]]], y = -log10(.data[[names(res_down)[5]]])), color = 'blue') }
+  
+  interactive_plot <- plotly::ggplotly(vplot, tooltip = "text")
+  return(interactive_plot)
+}
+plot_volcano_dmr <- function(title, res, p.thres, fc.thres) {
+  res <- res %>% as.data.frame()
+  res_up <- res[res[, "Seg_Est"] > fc.thres & res[, "Seg_Pval_adj"] < p.thres, ]
+  res_down <- res[res[, "Seg_Est"] < -fc.thres & res[, "Seg_Pval_adj"] < p.thres, ]
+  # Prepare the base plot
+  vplot <- ggplot(res, aes(Seg_Est, -log10(Seg_Pval_adj), text = Seg_ID)) +
+    geom_point(size = 2) +
+    geom_hline(yintercept = -log10(p.thres), linetype = "longdash", colour = "grey", size = 1) +
+    geom_vline(xintercept = fc.thres, linetype = "longdash", colour = "#BE684D", size = 1) +
+    geom_vline(xintercept = -fc.thres, linetype = "longdash", colour = "#2C467A", size = 1) +
+    labs(title = title, subtitle = "Volcano plot") +
+    ylab("-log10 Pval Adj") +
+    xlab("DNA Methylation Difference") +
+    theme_bw() +
+    scale_x_continuous(limits = c(-max(res[["Seg_Est"]]), max(res[["Seg_Est"]])), oob = scales::squish)
+  
+  # Highlight points based on thresholds
+  if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'red') }
+  if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'blue') }
+  
+  interactive_plot <- plotly::ggplotly(vplot, tooltip = "text")
+  return(interactive_plot)
+}
+```
+
 ```{r volcano}
 if(!params$skip_DM) {
-  for(n in names(test_result)){
-    p <- ggplot(test_result[[n]]) + geom_point(aes(!!sym(names(test_result[[n]])[3]), -log10(!!sym(names(test_result[[n]])[5])))) + ggtitle(n)
-    print(p)
-  }
-}  
+  vp_list_dmp <- lapply(names(test_result), function(x) plot_volcano_dmp(x, test_result[[x]], pval, eff_thres))
+  htmltools::tagList(setNames(vp_list_dmp, NULL))
+} 
 ```
 
 ## Differentially methylated regions (DMRs)
+
+```{r warning flag, results='asis'}
+if(length(warning_flag)>0) {
+  cat("***Note that for comparison(s) ", paste(warning_flag, sep = ", "), ", neither group had a replicate. So there was no p value could be produced for DMRs. The results below show all DMRs mapping to the CpGs with an effective size > ", eff_thres, ".***<br>", sep = "")
+}
+```
 
 ### Tables of significant DMRs
 
@@ -526,7 +596,7 @@ if(!params$skip_DM) {
 
 ```{r barplot-DMRs}
 if(!params$skip_DM) {
-  plot_data <- lapply(merged_plt, function(x) table(as.vector(x$Seg_Est>0))) %>% do.call(rbind, .)
+  plot_data <- lapply(merged_plt, function(x) table(factor(as.vector(x$Seg_Est > 0), levels = c(FALSE, TRUE)))) %>% do.call(rbind, .)
   colnames(plot_data) <- c("Hypomethylation","Hypermethylation")
   plot_data <- rownames_to_column(as.data.frame(plot_data), var = "Contrast")
   plot_data$Contrast <- factor(plot_data$Contrast, levels = names(merged_plt))
@@ -536,15 +606,204 @@ if(!params$skip_DM) {
 
 ### Volcano plots of all CpGs-merged regions
 
+*Note that the number of significant DMR shown in the volcano plot can be larger than those in the bar-plots and tables above because non-chromosome CpGs are also shown here.*
+
 ```{r volcano regions}
 if(!params$skip_DM) {
-  for(n in names(merged)){
-    p <- ggplot(merged[[n]]) + geom_point(aes(Seg_Est, -log10(Seg_Pval_adj))) + ggtitle(n)
-    print(p)
-  }
+  vp_list_dmr <- lapply(names(merged), function(x) plot_volcano_dmr(x, merged[[x]], seg_fdr, eff_thres))
+  htmltools::tagList(setNames(vp_list_dmr, NULL))
 }
+```
+
+# Differentially methylated probe (DMP) enrichment 
+
+## Feature enrichment
+
+Available database sets are listed in the table below. 
+
+```{r database table}
+KYCG_listDBGroups(params$platform) %>% DT::datatable(rownames = FALSE)
+```
+
+### Significant DMPs enriched features
+
+The tables below show features enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r enrichment test}
+query <- lapply(test_result_sig, function(x) x$Probe_ID)
+cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, platform = params$platform))
+cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+```
+
+### Top 20 enriched features
+
+The dot plots below show the top 20 enriched genes. Dot color indicates odds ratio (OR) in the Fisher's test. 
+
+```{r enrichment dotplot, results = 'hide'}
+lapply(names(cpg_enrichment_result), function(x) KYCG_plotDot(cpg_enrichment_result[[x]], title = paste(x, "Top 20 Feature Enrichments"))) 
+```
+
+### Additional database sets
+
+Additional GpG database sets available for the enrichment analysis are listed in the table below. This collection was downloaded from https://github.com/zhou-lab/KYCG_knowledgebase_EPICv2/tree/main. Please contact us further if you would like to test for the additional database. 
+
+```{r additional databases}
+more_dbs <- KYCG_loadDBs("KYCG_knowledgebase_EPICv2")
+lapply(more_dbs, attr, "group") %>% unlist %>% unique %>% as.tibble() %>% setNames("Database Group") %>% DT::datatable()
+```
+
+```{r additional enrichment test for selected database}
+# test for a selected database (pending function ...)
+# dbs <- KYCG_getDBs(group_nms = KYCG_listDBGroups(params$platform)[[1]][1], platform = params$platform)
+# cpg_enrichment_result <- lapply(query, function(x) testEnrichment(x, databases = dbs, platform = params$platform))
+```
+
+## Gene enrichment
+
+### Significant DMPs enriched genes
+
+Test whether the DMP sets are enriched for any genes. Probe-gene distance for association was set 10000 at most. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r gene enrichment}
+gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, KYCG_buildGeneDBs(x, max_distance=10000), platform = params$platform))
+gene_enrichment_result_dt <- lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, gene_name, FDR, nQ, nD, overlap) %>% DT::datatable(caption = paste(x, "Gene Enrichments")))
+htmltools::tagList(setNames(gene_enrichment_result_dt, NULL))
+```
+
+### Top 20 enriched genes
+
+The dot plots below show the top 20 enriched genes. Dot color indicates odds ratio (OR) in the Fisher's test. 
+
+```{r gene enrichment plot, results = 'hide'}
+lapply(names(gene_enrichment_result), function(x) KYCG_plotDot(gene_enrichment_result[[x]], label_by = "gene_name", title = paste(x, "Top 20 Gene Enrichments")))
+```
+
+## Gene-set over-representatoin analysis
+
+Get DMP-associated genes and test whether these genes are enriched for any GO terms. Probe-gene distance for association was set 10000 at most. Results were filtered with FDR < 0.05. DMP-associated gene-sets with a size < 20 were excluded from the analysis. 
+
+The dot plots below show the top 10 enriched GO terms or KEGG pathways. Please find the full results in tables in the `ORA` folder. 
+
+```{r enrichment-dotplot-function}
+gs_dotplot <- function(clusterProfResult, fdr_thres, title) {
+  # get the top 10 enriched gene sets in each cluster to plot
+  res2plot <- clusterProfResult@compareClusterResult %>% dplyr::filter(p.adjust < fdr_thres) %>% dplyr::group_by(Cluster) %>% dplyr::slice_head(n = 10) %>% dplyr::ungroup()
+  if (nrow(res2plot)==0) { return(NULL) }
+  # calculate gene ratio
+  res2plot$GeneRatio <- sapply(strsplit(res2plot$GeneRatio, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2]))
+  
+  # set the levels of x and y axis
+  res2plot$Cluster <- factor(res2plot$Cluster, levels = names(clusterProfResult@geneClusters))
+  res2plot$Description <- factor(res2plot$Description, levels = unique(res2plot$Description))
+  
+  p <- ggplot(res2plot, aes(x = Cluster, y = Description)) +
+    geom_point(aes(size = GeneRatio, colour = p.adjust), show.legend = T) + 
+    theme_bw() +
+    theme(
+      axis.text = element_text(colour = "black"),
+      axis.text.x = element_text(size = 12, angle = 90, vjust = 0.5, hjust = 1),
+      axis.text.y = element_text(size = 10),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12),
+      plot.margin = unit(c(0.5, 0.5, 0.1, 0.1), "cm")
+    ) +
+    labs(title = title, x = "", y = "", caption = "") +
+    scale_colour_gradient(name = "FDR adjusted\n p-value\n", limits = c(0, fdr_thres)) +
+    scale_size_continuous(name = "Gene Ratio")
+  print(p)
+}
+```
+
+```{r gene input}
+ora_genes <- lapply(query, function(x) lapply(KYCG_buildGeneDBs(x, max_distance = 10000), function(y) attributes(y)$gene_name) %>% unlist(use.names = FALSE) %>% unique())
+```
+
+```{r functional enrichment}
+if(!dir.exists(file.path(params$result_folder, "ORA"))) dir.create(file.path(params$result_folder, "ORA"))
+
+if (params$species == "human") {
+  gsorDb <- "org.Hs.eg.db"
+  keggOrg <- 'hsa'
+  msigdbr_species <- "Homo sapiens"
+} else if (params$species == "mouse") {
+  gsorDb <- "org.Mm.eg.db"
+  keggOrg <- 'mmu'
+  msigdbr_species <- "Mus musculus"
+} else if (params$species == "rat") {
+  gsorDb <- "org.Rn.eg.db"
+  keggOrg <- 'rno'
+  msigdbr_species <- "Rattus norvegicus"
+} else {
+  stop("Species not supported. ")
+}
+
+deGenes_ora <- ora_genes[sapply(ora_genes, length) >= 20]
+
+enrichGO_res <- list()
+go_cat <- c('BP','CC','MF')
+
+if (!all(sapply(deGenes_ora, length) == 0)) {
+  # run GO enrichment analysis
+  enrichGO_res$all <- lapply(go_cat, function(x) clusterProfiler::compareCluster(geneCluster = deGenes_ora, fun = 'enrichGO', keyType = 'SYMBOL', OrgDb = gsorDb, ont = x, readable = TRUE)) %>% setNames(go_cat)
+  # remove null elements
+  enrichGO_res$all <- if (all(sapply(enrichGO_res$all, is.null))) NULL else enrichGO_res$all[!sapply(enrichGO_res$all, is.null)]
+}
+if (!is.null(enrichGO_res$all)) {
+  # plot the enriched GO terms
+  lapply(names(enrichGO_res$all), function(x) gs_dotplot(enrichGO_res$all[[x]], params$ora_fdr_thres, paste0("Top 10 enriched GO ", x, " terms per contrast"))) %>% invisible()
+  # save the enriched GO terms
+  lapply(names(enrichGO_res$all), function(x) lapply(names(deGenes_ora), function(y) readr::write_csv(subset(enrichGO_res$all[[x]]@compareClusterResult, Cluster==y & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "ORA"), "/ORA_GO_", x, "_", gsub(" ", "_", y), "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv")))) %>% invisible()
+}
+
+enrichKEGG_res <- list()
+
+if (!all(sapply(deGenes_ora, length) == 0)) {
+  # map gene names to entrez ids
+  deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
+  # run KEGG enrichment analysis
+  enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
+}
+if (!is.null(enrichKEGG_res$all)) {
+  # plot the enriched KEGG pathways
+  gs_dotplot(enrichKEGG_res$all, params$ora_fdr_thres, "Top 10 enriched KEGG pathways per contrast")
+  # map entrez ids back to gene names
+  enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
+  # save the enriched KEGG pathways
+  lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "ORA"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
+}
+
+```
+
+# Metagene methylation levels
+
+```{r metagene}
+betas_meta <- betas
+rownames(betas_meta) <- gsub("_.*", "", rownames(betas_meta))
+KYCG_plotMeta(betas_meta)
+```
+
+# Track view with heatmap
+
+We are able to visualize the methylation level across a given genomic region, around a given gene, or around a given probe. Below shows an example of the visualization. Please contact us further if you would like to visualize certain genomic regions. 
+
+```{r track view with heatmap}
+visualizeGene('DNMT1', betas)
+# visualizeRegion('chr15', 96343814, 96544301, betas, platform="EPIC", show.probeNames = FALSE)
+# visualizeGene('DNMT1', betas, platform="EPIC", genome = "hg38")
+# visualizeProbes(c("cg00000165"), betas, platform="EPIC", genome = "hg38", upstream = 2000, dwstream = 2000)
 ```
 
 ```{r save DML results}
 if(!params$skip_DM && !params$test_mode) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
+```
+
+------------------------------------------------------------------------
+
+# Session info
+
+The output from running 'sessionInfo' is shown below and details all packages and version necessary to reproduce the results in this report.
+
+```{r session info}
+sessionInfo()
 ```
