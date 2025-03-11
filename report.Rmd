@@ -581,7 +581,7 @@ if(!params$skip_DM) {
 ## Differentially methylated regions (DMRs)
 
 ```{r warning flag, results='asis'}
-if(length(warning_flag)>0) {
+if(!params$skip_DM & length(warning_flag)>0) {
   cat("***Note that for comparison(s) ", paste(warning_flag, sep = ", "), ", neither group had a replicate. So there was no p value could be produced for DMRs. The results below show all DMRs mapping to the CpGs with an effective size > ", eff_thres, ".***<br>", sep = "")
 }
 ```
@@ -624,7 +624,9 @@ if(!params$skip_DM) {
 # Differentially methylated probe (DMP) enrichment 
 
 ```{r enrichment results folder}
-if(!dir.exists(file.path(params$result_folder, "Enrichment"))) dir.create(file.path(params$result_folder, "Enrichment"))
+if(!params$skip_DM) { 
+  if(!dir.exists(file.path(params$result_folder, "Enrichment"))) dir.create(file.path(params$result_folder, "Enrichment"))
+}
 ```
 
 ## Feature enrichment
@@ -632,7 +634,7 @@ if(!dir.exists(file.path(params$result_folder, "Enrichment"))) dir.create(file.p
 Available database sets are listed in the table below. 
 
 ```{r database table}
-KYCG_listDBGroups(params$platform) %>% DT::datatable(rownames = FALSE)
+if(!params$skip_DM) KYCG_listDBGroups(params$platform) %>% DT::datatable(rownames = FALSE)
 ```
 
 ### Significant DMPs enriched features
@@ -640,11 +642,13 @@ KYCG_listDBGroups(params$platform) %>% DT::datatable(rownames = FALSE)
 The tables below show features enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
 
 ```{r enrichment test}
-if (!exists("query")) query <- lapply(test_result_sig, function(x) x$Probe_ID)
-if (!exists("cpg_enrichment_result")) cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, platform = params$platform))
-lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_feature_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
-cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
-htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+if(!params$skip_DM) {
+  if (!exists("query")) query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  if (!exists("cpg_enrichment_result")) cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, platform = params$platform))
+  lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_feature_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+}
 ```
 
 ### Top 20 enriched features
@@ -652,7 +656,7 @@ htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
 The dot plots below show the top 20 enriched genes. Dot color indicates odds ratio (OR) in the Fisher's test. 
 
 ```{r enrichment dotplot, results = 'hide'}
-lapply(names(cpg_enrichment_result), function(x) KYCG_plotDot(cpg_enrichment_result[[x]], title = paste(x, "Top 20 Feature Enrichments"))) 
+if(!params$skip_DM) lapply(names(cpg_enrichment_result), function(x) KYCG_plotDot(cpg_enrichment_result[[x]], title = paste(x, "Top 20 Feature Enrichments"))) 
 ```
 
 ### Additional database sets
@@ -660,8 +664,10 @@ lapply(names(cpg_enrichment_result), function(x) KYCG_plotDot(cpg_enrichment_res
 Additional GpG database sets available for the enrichment analysis are listed in the table below. This collection was downloaded from https://github.com/zhou-lab/KYCG_knowledgebase_EPICv2/tree/main. Please contact us further if you would like to test for the additional database. 
 
 ```{r additional databases}
-more_dbs <- KYCG_loadDBs("KYCG_knowledgebase_EPICv2")
-lapply(more_dbs, attr, "group") %>% unlist %>% unique %>% as.tibble() %>% setNames("Database Group") %>% DT::datatable()
+if(!params$skip_DM) {
+  more_dbs <- KYCG_loadDBs("KYCG_knowledgebase_EPICv2")
+  lapply(more_dbs, attr, "group") %>% unlist %>% unique %>% as.tibble() %>% setNames("Database Group") %>% DT::datatable()
+}
 ```
 
 ```{r additional enrichment test for selected database}
@@ -677,10 +683,12 @@ lapply(more_dbs, attr, "group") %>% unlist %>% unique %>% as.tibble() %>% setNam
 Test whether the DMP sets are enriched for any genes. Probe-gene distance for association was set 10000 at most. Results were filtered with FDR < 0.05 and overlap > 10. 
 
 ```{r gene enrichment}
-if(!exists("gene_enrichment_result")) gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, KYCG_buildGeneDBs(x, max_distance=10000), platform = params$platform))
-lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_gene_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
-gene_enrichment_result_dt <- lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, gene_name, FDR, nQ, nD, overlap) %>% DT::datatable(caption = paste(x, "Gene Enrichments")))
-htmltools::tagList(setNames(gene_enrichment_result_dt, NULL))
+if(!params$skip_DM) {
+  if(!exists("gene_enrichment_result")) gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, KYCG_buildGeneDBs(x, max_distance=10000), platform = params$platform))
+  lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_gene_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
+  gene_enrichment_result_dt <- lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, gene_name, FDR, nQ, nD, overlap) %>% DT::datatable(caption = paste(x, "Gene Enrichments")))
+  htmltools::tagList(setNames(gene_enrichment_result_dt, NULL))
+}
 ```
 
 ### Top 20 enriched genes
@@ -688,7 +696,7 @@ htmltools::tagList(setNames(gene_enrichment_result_dt, NULL))
 The dot plots below show the top 20 enriched genes. Dot color indicates odds ratio (OR) in the Fisher's test. 
 
 ```{r gene enrichment plot, results = 'hide'}
-lapply(names(gene_enrichment_result), function(x) KYCG_plotDot(gene_enrichment_result[[x]], label_by = "gene_name", title = paste(x, "Top 20 Gene Enrichments")))
+if(!params$skip_DM) lapply(names(gene_enrichment_result), function(x) KYCG_plotDot(gene_enrichment_result[[x]], label_by = "gene_name", title = paste(x, "Top 20 Gene Enrichments")))
 ```
 
 ## Gene-set over-representatoin analysis
@@ -728,68 +736,70 @@ gs_dotplot <- function(clusterProfResult, fdr_thres, title) {
 ```
 
 ```{r gene input}
-if(!exists("ora_genes")) ora_genes <- lapply(query, function(x) lapply(KYCG_buildGeneDBs(x, max_distance = 10000), function(y) attributes(y)$gene_name) %>% unlist(use.names = FALSE) %>% unique())
+if(!params$skip_DM) {
+  if(!exists("ora_genes")) ora_genes <- lapply(query, function(x) lapply(KYCG_buildGeneDBs(x, max_distance = 10000), function(y) attributes(y)$gene_name) %>% unlist(use.names = FALSE) %>% unique())
+}
 ```
 
 ```{r functional enrichment, fig.height=12, fig.width=12}
+if(!params$skip_DM) {
+  if (params$species == "human") {
+    gsorDb <- "org.Hs.eg.db"
+    keggOrg <- 'hsa'
+    msigdbr_species <- "Homo sapiens"
+  } else if (params$species == "mouse") {
+    gsorDb <- "org.Mm.eg.db"
+    keggOrg <- 'mmu'
+    msigdbr_species <- "Mus musculus"
+  } else if (params$species == "rat") {
+    gsorDb <- "org.Rn.eg.db"
+    keggOrg <- 'rno'
+    msigdbr_species <- "Rattus norvegicus"
+  } else {
+    stop("Species not supported. ")
+  }
 
-if (params$species == "human") {
-  gsorDb <- "org.Hs.eg.db"
-  keggOrg <- 'hsa'
-  msigdbr_species <- "Homo sapiens"
-} else if (params$species == "mouse") {
-  gsorDb <- "org.Mm.eg.db"
-  keggOrg <- 'mmu'
-  msigdbr_species <- "Mus musculus"
-} else if (params$species == "rat") {
-  gsorDb <- "org.Rn.eg.db"
-  keggOrg <- 'rno'
-  msigdbr_species <- "Rattus norvegicus"
-} else {
-  stop("Species not supported. ")
-}
+  deGenes_ora <- ora_genes[sapply(ora_genes, length) >= 20]
 
-deGenes_ora <- ora_genes[sapply(ora_genes, length) >= 20]
+  if (!exists("enrichGO_res")) {
+    enrichGO_res <- list()
+    go_cat <- c('BP','CC','MF')
 
-if (!exists("enrichGO_res")) {
-  enrichGO_res <- list()
-  go_cat <- c('BP','CC','MF')
+    if (!all(sapply(deGenes_ora, length) == 0)) {
+      # run GO enrichment analysis
+      enrichGO_res$all <- lapply(go_cat, function(x) clusterProfiler::compareCluster(geneCluster = deGenes_ora, fun = 'enrichGO', keyType = 'SYMBOL', OrgDb = gsorDb, ont = x, readable = TRUE)) %>% setNames(go_cat)
+      # remove null elements
+      enrichGO_res$all <- if (all(sapply(enrichGO_res$all, is.null))) NULL else enrichGO_res$all[!sapply(enrichGO_res$all, is.null)]
+    }
+  }
 
-  if (!all(sapply(deGenes_ora, length) == 0)) {
-    # run GO enrichment analysis
-    enrichGO_res$all <- lapply(go_cat, function(x) clusterProfiler::compareCluster(geneCluster = deGenes_ora, fun = 'enrichGO', keyType = 'SYMBOL', OrgDb = gsorDb, ont = x, readable = TRUE)) %>% setNames(go_cat)
-    # remove null elements
-    enrichGO_res$all <- if (all(sapply(enrichGO_res$all, is.null))) NULL else enrichGO_res$all[!sapply(enrichGO_res$all, is.null)]
+  if (!is.null(enrichGO_res$all)) {
+    # plot the enriched GO terms
+    lapply(names(enrichGO_res$all), function(x) gs_dotplot(enrichGO_res$all[[x]], params$ora_fdr_thres, paste0("Top 10 enriched GO ", x, " terms per contrast"))) %>% invisible()
+    # save the enriched GO terms
+    lapply(names(enrichGO_res$all), function(x) lapply(names(deGenes_ora), function(y) readr::write_csv(subset(enrichGO_res$all[[x]]@compareClusterResult, Cluster==y & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_GO_", x, "_", gsub(" ", "_", y), "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv")))) %>% invisible()
+  }
+
+  if (!exists("enrichKEGG_res")) {
+    enrichKEGG_res <- list()
+
+    if (!all(sapply(deGenes_ora, length) == 0)) {
+      # map gene names to entrez ids
+      deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
+      # run KEGG enrichment analysis
+      enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
+      # map entrez ids back to gene names
+      enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
+    }
+  }
+
+  if (!is.null(enrichKEGG_res$all)) {
+    # plot the enriched KEGG pathways
+    gs_dotplot(enrichKEGG_res$all, params$ora_fdr_thres, "Top 10 enriched KEGG pathways per contrast")
+    # save the enriched KEGG pathways
+    lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
   }
 }
-
-if (!is.null(enrichGO_res$all)) {
-  # plot the enriched GO terms
-  lapply(names(enrichGO_res$all), function(x) gs_dotplot(enrichGO_res$all[[x]], params$ora_fdr_thres, paste0("Top 10 enriched GO ", x, " terms per contrast"))) %>% invisible()
-  # save the enriched GO terms
-  lapply(names(enrichGO_res$all), function(x) lapply(names(deGenes_ora), function(y) readr::write_csv(subset(enrichGO_res$all[[x]]@compareClusterResult, Cluster==y & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_GO_", x, "_", gsub(" ", "_", y), "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv")))) %>% invisible()
-}
-
-if (!exists("enrichKEGG_res")) {
-  enrichKEGG_res <- list()
-
-  if (!all(sapply(deGenes_ora, length) == 0)) {
-    # map gene names to entrez ids
-    deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
-    # run KEGG enrichment analysis
-    enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
-    # map entrez ids back to gene names
-    enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
-  }
-}
-
-if (!is.null(enrichKEGG_res$all)) {
-  # plot the enriched KEGG pathways
-  gs_dotplot(enrichKEGG_res$all, params$ora_fdr_thres, "Top 10 enriched KEGG pathways per contrast")
-  # save the enriched KEGG pathways
-  lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
-}
-
 ```
 
 # Metagene methylation levels
