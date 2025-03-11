@@ -457,6 +457,10 @@ if(!params$skip_DM) {
 
 ```
 
+```{r save DML results}
+if(!params$skip_DM && !params$test_mode) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
+```
+
 ### Top 100 significant DMPs
 
 The tables below show top 100 significant DMPs. Please find the full significant DMP lists in the `DMP` folder.
@@ -482,7 +486,7 @@ if(!params$skip_DM) {
 ```{r barplot-function}
 DM_barplots <- function(plot_data, title){
   space = (max(plot_data$Hypermethylation)-min(plot_data$Hypomethylation))*0.15/2
-  bp_ratio = nrow(plot_data)/(max(plot_data$Hypermethylation)-min(plot_data$Hypomethylation))
+  bp_ratio = nrow(plot_data)/(max(plot_data$Hypermethylation)-min(plot_data$Hypomethylation))/4
   ggplot(plot_data, aes(x = Contrast)) +
     geom_bar(aes(y = Hypermethylation, fill = "Hypermethylation"), stat = "identity", position = "identity") +
     geom_bar(aes(y = -Hypomethylation, fill = "Hypomethylation"), stat = "identity", position = "identity") +
@@ -533,14 +537,13 @@ plot_volcano_dmp <- function(title, res, p.thres, fc.thres) {
     ylab("-log10 P") +
     xlab("DNA Methylation Difference") +
     theme_bw() +
-    scale_x_continuous(limits = c(-0.8, 0.8), oob = scales::squish)
+    scale_x_continuous(limits = c(-1, 1), oob = scales::squish)
   
   # Highlight points based on thresholds
   if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(x = .data[[names(res_up)[3]]], y = -log10(.data[[names(res_up)[5]]])), color = 'red') }
   if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(x = .data[[names(res_down)[3]]], y = -log10(.data[[names(res_down)[5]]])), color = 'blue') }
   
-  interactive_plot <- plotly::ggplotly(vplot, tooltip = "text")
-  return(interactive_plot)
+  return(vplot)
 }
 plot_volcano_dmr <- function(title, res, p.thres, fc.thres) {
   res <- res %>% as.data.frame()
@@ -562,15 +565,16 @@ plot_volcano_dmr <- function(title, res, p.thres, fc.thres) {
   if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'red') }
   if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'blue') }
   
-  interactive_plot <- plotly::ggplotly(vplot, tooltip = "text")
-  return(interactive_plot)
+  return(vplot)
 }
 ```
 
 ```{r volcano}
 if(!params$skip_DM) {
-  vp_list_dmp <- lapply(names(test_result), function(x) plot_volcano_dmp(x, test_result[[x]], pval, eff_thres))
-  htmltools::tagList(setNames(vp_list_dmp, NULL))
+  for (x in names(test_result)) {
+    vp_list_dmp <- plot_volcano_dmp(x, test_result[[x]], pval, eff_thres)
+    print(vp_list_dmp)
+  }
 } 
 ```
 
@@ -610,12 +614,18 @@ if(!params$skip_DM) {
 
 ```{r volcano regions}
 if(!params$skip_DM) {
-  vp_list_dmr <- lapply(names(merged), function(x) plot_volcano_dmr(x, merged[[x]], seg_fdr, eff_thres))
-  htmltools::tagList(setNames(vp_list_dmr, NULL))
+  for (x in names(merged)) {
+    vp_list_dmr <- plot_volcano_dmr(x, merged[[x]], seg_fdr, eff_thres)
+    print(vp_list_dmr)
+  }
 }
 ```
 
 # Differentially methylated probe (DMP) enrichment 
+
+```{r enrichment results folder}
+if(!dir.exists(file.path(params$result_folder, "Enrichment"))) dir.create(file.path(params$result_folder, "Enrichment"))
+```
 
 ## Feature enrichment
 
@@ -630,8 +640,9 @@ KYCG_listDBGroups(params$platform) %>% DT::datatable(rownames = FALSE)
 The tables below show features enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
 
 ```{r enrichment test}
-query <- lapply(test_result_sig, function(x) x$Probe_ID)
-cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, platform = params$platform))
+if (!exists("query")) query <- lapply(test_result_sig, function(x) x$Probe_ID)
+if (!exists("cpg_enrichment_result")) cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, platform = params$platform))
+lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_feature_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
 cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
 htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
 ```
@@ -666,7 +677,8 @@ lapply(more_dbs, attr, "group") %>% unlist %>% unique %>% as.tibble() %>% setNam
 Test whether the DMP sets are enriched for any genes. Probe-gene distance for association was set 10000 at most. Results were filtered with FDR < 0.05 and overlap > 10. 
 
 ```{r gene enrichment}
-gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, KYCG_buildGeneDBs(x, max_distance=10000), platform = params$platform))
+if(!exists("gene_enrichment_result")) gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, KYCG_buildGeneDBs(x, max_distance=10000), platform = params$platform))
+lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_gene_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
 gene_enrichment_result_dt <- lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, gene_name, FDR, nQ, nD, overlap) %>% DT::datatable(caption = paste(x, "Gene Enrichments")))
 htmltools::tagList(setNames(gene_enrichment_result_dt, NULL))
 ```
@@ -716,11 +728,10 @@ gs_dotplot <- function(clusterProfResult, fdr_thres, title) {
 ```
 
 ```{r gene input}
-ora_genes <- lapply(query, function(x) lapply(KYCG_buildGeneDBs(x, max_distance = 10000), function(y) attributes(y)$gene_name) %>% unlist(use.names = FALSE) %>% unique())
+if(!exists("ora_genes")) ora_genes <- lapply(query, function(x) lapply(KYCG_buildGeneDBs(x, max_distance = 10000), function(y) attributes(y)$gene_name) %>% unlist(use.names = FALSE) %>% unique())
 ```
 
-```{r functional enrichment}
-if(!dir.exists(file.path(params$result_folder, "ORA"))) dir.create(file.path(params$result_folder, "ORA"))
+```{r functional enrichment, fig.height=12, fig.width=12}
 
 if (params$species == "human") {
   gsorDb <- "org.Hs.eg.db"
@@ -740,37 +751,43 @@ if (params$species == "human") {
 
 deGenes_ora <- ora_genes[sapply(ora_genes, length) >= 20]
 
-enrichGO_res <- list()
-go_cat <- c('BP','CC','MF')
+if (!exists("enrichGO_res")) {
+  enrichGO_res <- list()
+  go_cat <- c('BP','CC','MF')
 
-if (!all(sapply(deGenes_ora, length) == 0)) {
-  # run GO enrichment analysis
-  enrichGO_res$all <- lapply(go_cat, function(x) clusterProfiler::compareCluster(geneCluster = deGenes_ora, fun = 'enrichGO', keyType = 'SYMBOL', OrgDb = gsorDb, ont = x, readable = TRUE)) %>% setNames(go_cat)
-  # remove null elements
-  enrichGO_res$all <- if (all(sapply(enrichGO_res$all, is.null))) NULL else enrichGO_res$all[!sapply(enrichGO_res$all, is.null)]
+  if (!all(sapply(deGenes_ora, length) == 0)) {
+    # run GO enrichment analysis
+    enrichGO_res$all <- lapply(go_cat, function(x) clusterProfiler::compareCluster(geneCluster = deGenes_ora, fun = 'enrichGO', keyType = 'SYMBOL', OrgDb = gsorDb, ont = x, readable = TRUE)) %>% setNames(go_cat)
+    # remove null elements
+    enrichGO_res$all <- if (all(sapply(enrichGO_res$all, is.null))) NULL else enrichGO_res$all[!sapply(enrichGO_res$all, is.null)]
+  }
 }
+
 if (!is.null(enrichGO_res$all)) {
   # plot the enriched GO terms
   lapply(names(enrichGO_res$all), function(x) gs_dotplot(enrichGO_res$all[[x]], params$ora_fdr_thres, paste0("Top 10 enriched GO ", x, " terms per contrast"))) %>% invisible()
   # save the enriched GO terms
-  lapply(names(enrichGO_res$all), function(x) lapply(names(deGenes_ora), function(y) readr::write_csv(subset(enrichGO_res$all[[x]]@compareClusterResult, Cluster==y & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "ORA"), "/ORA_GO_", x, "_", gsub(" ", "_", y), "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv")))) %>% invisible()
+  lapply(names(enrichGO_res$all), function(x) lapply(names(deGenes_ora), function(y) readr::write_csv(subset(enrichGO_res$all[[x]]@compareClusterResult, Cluster==y & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_GO_", x, "_", gsub(" ", "_", y), "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv")))) %>% invisible()
 }
 
-enrichKEGG_res <- list()
+if (!exists("enrichKEGG_res")) {
+  enrichKEGG_res <- list()
 
-if (!all(sapply(deGenes_ora, length) == 0)) {
-  # map gene names to entrez ids
-  deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
-  # run KEGG enrichment analysis
-  enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
+  if (!all(sapply(deGenes_ora, length) == 0)) {
+    # map gene names to entrez ids
+    deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
+    # run KEGG enrichment analysis
+    enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
+  }
 }
+
 if (!is.null(enrichKEGG_res$all)) {
   # plot the enriched KEGG pathways
   gs_dotplot(enrichKEGG_res$all, params$ora_fdr_thres, "Top 10 enriched KEGG pathways per contrast")
   # map entrez ids back to gene names
   enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
   # save the enriched KEGG pathways
-  lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "ORA"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
+  lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
 }
 
 ```
@@ -794,7 +811,7 @@ visualizeGene('DNMT1', betas)
 # visualizeProbes(c("cg00000165"), betas, platform="EPIC", genome = "hg38", upstream = 2000, dwstream = 2000)
 ```
 
-```{r save DML results}
+```{r save enrichment results}
 if(!params$skip_DM && !params$test_mode) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
 ```
 

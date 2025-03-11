@@ -20,5 +20,30 @@ Before rendering, check the following parameters:
 1) Render the script on local machine with `skip_DM: TRUE`. The raw data read-in cannot be done on Randi (likely due to a bug in `sesame` which causes `BiocParallel` errors). A `report.html` file will be generated and R objects will be saved to a `<result_folder>.RData` file. 
 2) We may need to render the report for several times to find the best tSNE perplexity. To save computing time, the program will try to load from the `<result_folder>.RData` that already exists in the working directory and use it for analyses downstream of QC instead of reading from raw data. If you want to restart from reading in raw data, please remove the `<result_folder>.RData` file from current working directory or change `result_folder` before rendering the script again. 
 3) Upload the `<result_folder>.RData` and the script to Randi. 
-4) Run differential methylation tests on Randi by setting `skip_DM: FALSE` and render the script using the environmental image at [https://hub.docker.com/r/jonalin/cri-methylation-array-report](https://hub.docker.com/r/jonalin/cri-methylation-array-report).*
+4) Run differential methylation tests on Randi by setting `skip_DM: FALSE` and render the script using the environmental image at [https://hub.docker.com/r/jonalin/cri-methylation-array-report](https://hub.docker.com/r/jonalin/cri-methylation-array-report). 
+
+> The DML function for testing DMPs takes a long time (~40min per contrast). It's very likely that when knitting Rmd file in RStudio, the RStudio session loses connection and the rendering is failed. So you might need to run the following slurm job first to ensure all DMP testing to be completed. The rendering by this slurm script somehow has problem on server. So in the end you will need to render the final report in the Rstudio. The program will detect whether there is an existing DMP test result in the project RData and skip the time-consuming process if detected.
+
+```
+#!/bin/bash -l
+#SBATCH --job-name=report
+#SBATCH --partition=tier1q
+#SBATCH --time=1-00:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=100gb
+#SBATCH -o %x_%j.out
+#SBATCH -e %x_%j.err
+
+#module load singularity
+
+singularity exec \
+ --env JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64 \
+ --env LD_LIBRARY_PATH=/usr/lib/jvm/java-11-openjdk-amd64/lib/server:$LD_LIBRARY_PATH \
+ --bind /gpfs/data/bioinformatics/Projects:/home/qiaoshan/Projects \
+ /gpfs/data/bioinformatics/qlin/methylation-array_analysis_templates/methylation-array.sif \
+ Rscript -e "rmarkdown::render('/home/qiaoshan/Projects/CRI-BIO-1091-1092-1094-Path-JBennett-qiaoshan-yli/CRI-BIO-1092-report-v2.Rmd')"
+
+```
 
