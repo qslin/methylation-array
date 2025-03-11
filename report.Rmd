@@ -645,7 +645,7 @@ The tables below show features enriched with DMPs. Results were filtered with FD
 if(!params$skip_DM) {
   if (!exists("query")) query <- lapply(test_result_sig, function(x) x$Probe_ID)
   if (!exists("cpg_enrichment_result")) cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, platform = params$platform))
-  lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_feature_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
+  lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_feature_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE)) %>% invisible()
   cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
   htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
 }
@@ -685,7 +685,7 @@ Test whether the DMP sets are enriched for any genes. Probe-gene distance for as
 ```{r gene enrichment}
 if(!params$skip_DM) {
   if(!exists("gene_enrichment_result")) gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, KYCG_buildGeneDBs(x, max_distance=10000), platform = params$platform))
-  lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_gene_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE))
+  lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_gene_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE)) %>% invisible()
   gene_enrichment_result_dt <- lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, gene_name, FDR, nQ, nD, overlap) %>% DT::datatable(caption = paste(x, "Gene Enrichments")))
   htmltools::tagList(setNames(gene_enrichment_result_dt, NULL))
 }
