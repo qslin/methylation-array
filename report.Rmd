@@ -778,14 +778,14 @@ if (!exists("enrichKEGG_res")) {
     deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
     # run KEGG enrichment analysis
     enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
+    # map entrez ids back to gene names
+    enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
   }
 }
 
 if (!is.null(enrichKEGG_res$all)) {
   # plot the enriched KEGG pathways
   gs_dotplot(enrichKEGG_res$all, params$ora_fdr_thres, "Top 10 enriched KEGG pathways per contrast")
-  # map entrez ids back to gene names
-  enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
   # save the enriched KEGG pathways
   lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
 }
