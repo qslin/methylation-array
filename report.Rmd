@@ -8,27 +8,32 @@ output:
     df_print: paged
     theme: yeti
     highlight: tango
-    toc: yes
+    toc: true
     toc_float:
-      collapsed: no
-      smooth_scroll: no
-    number_sections: yes
+      collapsed: false
+      smooth_scroll: false
+    number_sections: true
     self_contained: true
 params:
-  raw_data_root_folder: "raw_data"
-  sampleinfo: "sampleinfo.csv" # The first column must be Sample_Name whose values are exactly the same as those in metadata files (in .csv format) of the raw data; metadata files should be inside the raw_data_root_folder; the samples in sampleinfo can be a subset of raw data. There must be a Group column indicating sample groups to compare. 
-  platform: "EPICv2"
-  result_folder: "Demostration"
-  remove_bad_samples: TRUE
-  unmask: FALSE
-  tSNE_perplexity: 3
-  skip_DM: FALSE
-  test_mode: TRUE
+  raw_data_root_folder: raw_data
+  sampleinfo: sampleinfo.csv
+  platform: EPICv2
+  result_folder: Demostration
+  remove_bad_samples: true
+  unmask: false
+  extra_mask: false
+  pOOBAH_pval: 0.05
+  match_design: true
+  batch_correction_method: combat
+  batch_to_correct: "2025-09-25"
+  tSNE_perplexity: 12
+  skip_DM: false
+  test_mode: true
   contrast_pairs: !expr list(
-    c("STK11 Adnexal Tumor", "Adult Granulosa Cell Tumor"),
-    c("STK11 Adnexal Tumor", "Mesothelioma")
+      c("Group1", "Group2"),
+      c("Group1", "Group3")
     )
-  species: "human"
+  species: human
   ora_fdr_thres: 0.05
 ---
 
@@ -51,6 +56,13 @@ library(ggrepel)
 library(org.Hs.eg.db)
 library(org.Mm.eg.db)
 library(clusterProfiler)
+library(limma)
+library(sva)
+library(RPMM)
+library(minfi)
+library(AnnotationHub)
+library(DNAcopy)
+library(knowYourCG)
 
 sesameDataCache()
 
@@ -65,6 +77,14 @@ if(!dir.exists(params$result_folder)) dir.create(params$result_folder)
 We use [sesame](https://bioconductor.org/packages/release/bioc/vignettes/sesame/inst/doc/sesame.html) to analyze the data as recommended by Illumina.
 
 We use the standard openSesame workflow to process raw signal data to beta values. A description of the method details can be found in [this article](https://epicom.biomedcentral.com/articles/10.1186/s43682-023-00021-5). 
+
+The following steps were executed during preprocessing: 
+
+- 1) probes of poor design were masked, including the recommended probes to mask by Sesame, and probes that are cross reactive with other parts of the genome, which is indicated by the CH_WGBS_evidence column in [EPICv2manifest](https://bioconductor.statistik.tu-dortmund.de/packages/3.19/data/annotation/vignettes/EPICv2manifest/inst/doc/EPICv2manifest.html) (when `extra_mask` is `TRUE`).
+- 2) color channels for Type-I probes were inferred and reset instead of using what is specified in manifest.
+- 3) dye bias was corrected using the nonlinear scaling method in Sesame to address the intensity differences between green and red channels.
+- 4) background subtraction: background was modeled in a normal distribution and true signal in an exponential distribution, for which the deconvolution is parameterized using Out-Of-Band (oob) probes.
+- 5) experiment-dependent masking based on signal detection p-values is performed to exclude artifactual methylation-level reading and probes with too much influence from signal background.
 
 ```{r pre-processing}
 
@@ -88,10 +108,28 @@ if (file.exists(paste0(params$result_folder, ".RData"))){
   
   sdfs = lapply(idats, readIDATpair, platform = params$platform) %>% setNames(gsub(".*/", "", idats))
   sdfs = sdfs[coldata$IDAT]
+  
+  ah <- AnnotationHub()
+  EPICv2manifest <- ah[["AH116484"]]
 
-  betas = openSesame(sdfs, collapseToPfx=FALSE)
-  betas_unmask = openSesame(sdfs, collapseToPfx=FALSE, mask=FALSE)
+  # listAvailableMasks("EPICv2") to check available masks
+  # By default, the recommended masks for EPICv2 are:
+  # c("M_mapping","M_nonuniq","M_1baseSwitchSNPcommon_5pt","M_2extBase_SNPcommon_5pt","M_SNPcommon_5pt")
+  sdfs_pp = openSesame(sdfs, prep = "QCDPB", 
+                       prep_args = list(Q=list(mask_names = "recommended"), P=list(pval.threshold = params$pOOBAH_pval)), 
+                       func = NULL)
+  if (params$extra_mask) {
+    sdfs_pp = lapply(sdfs_pp, addMask, probes = rownames(EPICv2manifest)[EPICv2manifest[["CH_WGBS_evidence"]]=="Y"])
+  }
+  if (params$match_design) {
+    sdfs_pp = lapply(sdfs_pp, matchDesign)
+  }
+  
+  betas = lapply(sdfs_pp, getBetas, collapseToPfx=FALSE) %>% do.call(cbind, .)
+  betas_unmask = lapply(sdfs_pp, getBetas, collapseToPfx=FALSE, mask=FALSE) %>% do.call(cbind, .)
   coldata = coldata[na.omit(match(colnames(betas), coldata$IDAT)),]
+  
+  segs <- lapply(sdfs_pp, function(x) cnSegmentation(x))
 }
 
 ```
@@ -123,7 +161,23 @@ if (file.exists(paste0(params$result_folder, ".RData"))){
 
 # QC
 
-## Tables
+## Bisulfite conversion efficiency
+
+The closer GCT score to 1, the more effecient the bisulfite conversion is.
+
+```{r bisConversionControl}
+mft = sesameAnno_buildManifestGRanges(sprintf(
+    "%s/EPICv2/EPICv2.hg38.manifest.tsv.gz",
+    "https://github.com/zhou-lab/InfiniumAnnotationV1/raw/main/Anno/"),
+    columns="nextBase")
+extR = names(mft)[!is.na(mft$nextBase) & mft$nextBase=="R"]
+extA = names(mft)[!is.na(mft$nextBase) & mft$nextBase=="A"]
+
+lapply(sdfs, function(x) bisConversionControl(x, extR = extR, extA = extA)) %>% unlist() %>% as.data.frame() %>% setNames("GCT score") %>% DT::datatable(rownames = TRUE)
+
+```
+
+## Tables (Before pre-processing)
 
 ```{r QC}
 
@@ -150,7 +204,7 @@ htmltools::tagList(setNames(qcs_dt, NULL))
 
 ```
 
-## Selected barplots
+## Selected barplots (Before pre-processing)
 
 Please find the full set of barplots in the `QC-Bar` folder.
 
@@ -161,14 +215,73 @@ if (!file.exists(paste0(params$result_folder, ".RData"))){
 
   for (f in c("detection", "intensity", "numProbes", "channel", "dyeBias", "betas")) {
     h = length(qcs[[f]][[1]]@group[[1]])*250
-    png(paste0(params$result_folder, "/QC-Bar/barplot_", f, ".png"), width = 500, height = h, units = "px")
+    png(paste0(params$result_folder, "/QC-Bar/barplot_", f, "_before.png"), width = 500, height = h, units = "px")
     sesameQC_plotBar(qcs[[f]], keys = "") %>% print()
     dev.off()
   }
 }
 
-for (f in c("detection", "intensity")) {
+for (f in c("detection", "intensity", "dyeBias", "betas")) {
   sesameQC_plotBar(qcs[[f]]) %>% print()
+}
+
+```
+
+## Tables (After pre-processing)
+
+```{r QC 2}
+
+if (!file.exists(paste0(params$result_folder, ".RData"))){
+  qcs_pp = list()
+  qcs_pp_df = list()
+  qcs_pp_dt = list()
+  for (f in c("detection", "intensity", "numProbes", "channel", "dyeBias", "betas")) {
+    qcs_pp[[f]] = openSesame(sdfs_pp, prep="", func=sesameQC_calcStats, funs=f)
+    qcs_pp_df[[f]] = do.call(rbind, lapply(qcs_pp[[f]], as.data.frame))
+    colnames(qcs_pp_df[[f]]) = qcs_pp[[f]][[1]]@group[[1]][colnames(qcs_pp_df[[f]])]
+    qcs_pp_dt[[f]] = DT::datatable(data = qcs_pp_df[[f]], caption = names(qcs_pp[[f]][[1]]@group), rownames = T)
+  }
+}
+
+htmltools::tagList(setNames(qcs_pp_dt, NULL))
+
+```
+
+## Selected barplots (After pre-processing)
+
+Please find the full set of barplots in the `QC-Bar` folder.
+
+```{r barplots 2}
+
+if (!file.exists(paste0(params$result_folder, ".RData"))){
+  if(!dir.exists(paste0(params$result_folder, "/QC-Bar"))) dir.create(paste0(params$result_folder, "/QC-Bar"))
+
+  for (f in c("detection", "intensity", "numProbes", "channel", "dyeBias", "betas")) {
+    h = length(qcs_pp[[f]][[1]]@group[[1]])*250
+    png(paste0(params$result_folder, "/QC-Bar/barplot_", f, "_after.png"), width = 500, height = h, units = "px")
+    sesameQC_plotBar(qcs_pp[[f]], keys = "") %>% print()
+    dev.off()
+  }
+}
+
+for (f in c("detection", "intensity", "dyeBias", "betas")) {
+  sesameQC_plotBar(qcs_pp[[f]]) %>% print()
+}
+
+```
+
+```{r BetaByDesign, include=FALSE }
+
+if (!file.exists(paste0(params$result_folder, ".RData"))){
+  if(!dir.exists(paste0(params$result_folder, "/QC-BetaByDesign"))) dir.create(paste0(params$result_folder, "/QC-BetaByDesign"))
+
+  for (f in names(sdfs)) {
+    png(paste0(params$result_folder, "/QC-BetaByDesign/densityplot_", f, ".png"), width = 500, height = 500, units = "px")
+    par(mfrow=c(2,1), mar=c(3,3,2,1))
+    sesameQC_plotBetaByDesign(sdfs[[f]], main="Before Pre-processing", xlab="\beta") %>% print()
+    sesameQC_plotBetaByDesign(sdfs_pp[[f]], main="After Pre-processing", xlab="\beta") %>% print()
+    dev.off()
+  }
 }
 
 ```
@@ -179,8 +292,10 @@ if (!file.exists(paste0(params$result_folder, ".RData"))){
   if(!dir.exists(paste0(params$result_folder, "/QC-RedGrnQQ"))) dir.create(paste0(params$result_folder, "/QC-RedGrnQQ"))
 
   for (f in names(sdfs)) {
-    png(paste0(params$result_folder, "/QC-RedGrnQQ/qqplot_", f, ".png"), width = 500, height = 500, units = "px")
-    sesameQC_plotRedGrnQQ(sdfs[[f]]) %>% print()
+    png(paste0(params$result_folder, "/QC-RedGrnQQ/qqplot_", f, ".png"), width = 900, height = 500, units = "px")
+    par(mfrow=c(1,2), mar=c(3,3,2,1))
+    sesameQC_plotRedGrnQQ(sdfs[[f]], main = "Before Pre-processing") %>% print()
+    sesameQC_plotRedGrnQQ(sdfs_pp[[f]], main = "After Pre-processing") %>% print()
     dev.off()
   }
 }
@@ -193,8 +308,10 @@ if (!file.exists(paste0(params$result_folder, ".RData"))){
   if(!dir.exists(paste0(params$result_folder, "/QC-IntensVsBetas"))) dir.create(paste0(params$result_folder, "/QC-IntensVsBetas"))
 
   for (f in names(sdfs)) {
-    png(paste0(params$result_folder, "/QC-IntensVsBetas/intbetaplot_", f, ".png"), width = 500, height = 500, units = "px")
+    png(paste0(params$result_folder, "/QC-IntensVsBetas/intbetaplot_", f, ".png"), width = 900, height = 500, units = "px")
+    par(mfrow=c(1,2), mar=c(3,3,2,1))
     sesameQC_plotIntensVsBetas(sdfs[[f]]) %>% print()
+    sesameQC_plotIntensVsBetas(sdfs_pp[[f]]) %>% print()
     dev.off()
   }
 }
@@ -233,6 +350,68 @@ if(params$remove_bad_samples){
 ```{r save env}
 if (!file.exists(paste0(params$result_folder, ".RData"))) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
 ```
+
+## Batch correction
+
+```{r batch correction, results='asis'}
+if(params$unmask){
+  betas_clean <- na.omit(betas_unmask)
+}else{
+  betas_clean <- na.omit(betas)
+}
+if(!is.null(params$batch_correction_method)){
+  if(params$batch_correction_method=="limma"){
+    coldata$Batch <- factor(coldata$Batch)
+    coldata$Group <- factor(coldata$Group)
+  
+    # design matrix must be numeric
+    design <- model.matrix(~ Group, data = coldata)
+  
+    # Run batch correction
+    betas_clean <- limma::removeBatchEffect(
+        betas_clean,
+        batch = coldata$Batch,
+        design = design
+    )
+    cat("Note that batch effect correction has been done using limma::removeBatchEffect\n")
+  }else if(params$batch_correction_method=="combat"){
+    mod <- model.matrix(~ Group, coldata)
+    betas_clean <- sva::ComBat(betas_clean, batch=coldata$Batch, mod=mod)
+    cat("Note that batch effect correction has been done using ComBat.\n")
+  }else if(params$batch_correction_method=="icombat"){
+    source(file = "iComBat-main/scripts/icombat.R")
+    betas_clean_init <- ComBatInitialize(
+      betas_clean[,!coldata$Batch%in%params$batch_to_correct],
+      coldata$Batch[!coldata$Batch%in%params$batch_to_correct],
+      mod = NULL,
+      mean.only = FALSE
+    )
+    betas_clean[,coldata$Batch%in%params$batch_to_correct] <- ComBatIncremental(
+      betas_clean[,coldata$Batch%in%params$batch_to_correct],
+      params$batch_to_correct,
+      betas_clean_init,
+      mod.new = NULL,
+      par.prior = TRUE,
+      prior.plots = FALSE,
+      intercept.col = 1
+    )
+    cat("Note that batch effect correction has been done using iComBat.\n")
+  }else{
+    stop("Please provide one of the following batch correction methods: limma, combat, icombat.")
+  }
+}else{
+  cat("Note that batch effect correction was skipped.\n")
+}
+```
+
+<!-- ```{r remove suspecious sample 1, results='asis'}
+coldata <- coldata[!coldata$IDAT=="208781040014_R05C01",]
+betas <- betas[,!colnames(betas)=="208781040014_R05C01"]
+betas_unmask <- betas_unmask[,!colnames(betas_unmask)=="208781040014_R05C01"]
+betas_clean <- betas_clean[,!colnames(betas_clean)=="208781040014_R05C01"]
+segs[["208781040014_R05C01"]] <- NULL
+cat("Suspecious FATWO sample 208781040014_R05C01 clustered to Endometrioid Carcinoma. Remove it temporarily. ")
+``` -->
 
 # t-SNE plots
 
@@ -282,11 +461,6 @@ tsne_plot <- function(tsne_result, coldata, title){
 
 ```{r t-SNE all, include=FALSE}
 
-if(params$unmask){
-  betas_clean <- betas_unmask
-}else{
-  betas_clean <- na.omit(betas)
-}
 set.seed(123)  # Set a seed for reproducibility
 tsne_result <- Rtsne(t(betas_clean), dims = 2, perplexity = params$tSNE_perplexity, verbose = TRUE)
 gp <- tsne_plot(tsne_result, coldata, "t-SNE clustering")
@@ -315,7 +489,118 @@ gp <- tsne_plot(tsne_result, coldata, "t-SNE clustering")
 ggplotly(gp, tooltip = "label")
 ```
 
+## Using the top 1k most variable CpG loci (probes)
+
+```{r t-SNE top1k, include=FALSE}
+
+top1k <- rownames(betas_clean)[order(rowVars(betas_clean), decreasing=TRUE)] %>% head(1000)
+betas_clean_top <- betas_clean[top1k,]
+
+set.seed(123)  # Set a seed for reproducibility
+tsne_result <- Rtsne(t(betas_clean_top), dims = 2, perplexity = params$tSNE_perplexity, verbose = TRUE)
+
+gp <- tsne_plot(tsne_result, coldata, "t-SNE clustering")
+
+```
+
+```{r plot out top1k, fig.width=8, results='asis'}
+ggplotly(gp, tooltip = "label")
+```
+
+# MDS plots
+
+MDS plot is better for showing global distance and evaluating before/after batch effects correction. 
+
+```{r MDS notes, results='asis'}
+if(params$unmask){
+  cat("Note that we used a probe matrix without masking bad detection p-values for the MDS analysis. ", nrow(betas_unmask), " CpG loci were used here.")
+}else{
+  cat("Note that probes with bad detection p-values were masked as NAs in the QC steps. These probes were removed from the MDS analysis. ", nrow(na.omit(betas)), " out of ", nrow(betas), " CpG loci were removed here.")
+}
+```
+
+```{r MDS function, include=FALSE}
+
+mds_plot <- function(betas_matrix, coldata, title = "MDS Plot") {
+
+  ## 1. Compute distance + classical MDS
+  d <- dist(t(betas_matrix))              # distance across samples
+  mds <- cmdscale(d, k = 2)               # extract 2 dimensions
+  mds_df <- as.data.frame(mds)
+  colnames(mds_df) <- c("MDS1", "MDS2")
+
+  ## 2. Bind metadata (assuming coldata row order matches samples)
+  plot_data <- cbind(mds_df, coldata[,-1])  # remove IDAT column
+
+  ## 3. Plot
+  if (ncol(plot_data) == 4) {
+    gp <- ggplot(plot_data,
+                 aes(x = MDS1, y = MDS2,
+                     label = Sample_Name,
+                     color = !!sym(names(plot_data)[4]))) +
+      geom_point(size = 3) +
+      labs(title = title) +
+      theme_minimal() +
+      scale_color_brewer(palette = "Set2")
+
+  } else if (ncol(plot_data) > 4) {
+    gp <- ggplot(plot_data,
+                 aes(x = MDS1, y = MDS2,
+                     label = Sample_Name,
+                     color = !!sym(names(plot_data)[4]),
+                     shape = !!sym(names(plot_data)[5]))) +
+      geom_point(size = 3) +
+      labs(title = title) +
+      theme_minimal() +
+      scale_color_brewer(palette = "Set2")
+  }
+
+  return(gp)
+}
+
+```
+
+## Using all CpG loci (probes)
+
+```{r MDS all, include=FALSE}
+gp <- mds_plot(betas_clean, coldata, "MDS Plot")
+```
+
+```{r plot out MDS all, fig.width=8, results='asis'}
+ggplotly(gp, tooltip = "label")
+```
+
+## Using the top 10k most variable CpG loci (probes)
+
+```{r MDS top10k, include=FALSE}
+
+top10k <- rownames(betas_clean)[order(rowVars(betas_clean), decreasing=TRUE)] %>% head(10000)
+betas_clean_top <- betas_clean[top10k,]
+gp <- mds_plot(betas_clean_top, coldata)
+
+```
+
+```{r plot out MDS top10k, fig.width=8, results='asis'}
+ggplotly(gp, tooltip = "label")
+```
+
+## Using the top 1k most variable CpG loci (probes)
+
+```{r MDS top1k, include=FALSE}
+
+top1k <- rownames(betas_clean)[order(rowVars(betas_clean), decreasing=TRUE)] %>% head(1000)
+betas_clean_top <- betas_clean[top1k,]
+gp <- mds_plot(betas_clean_top, coldata)
+
+```
+
+```{r plot out MDS top1k, fig.width=8, results='asis'}
+ggplotly(gp, tooltip = "label")
+```
+
 # Heatmap with unsupervised hierarchical clustering
+
+## Top10k probes
 
 ```{r heatmap notes, results='asis'}
 if(params$unmask){
@@ -328,11 +613,13 @@ if(params$unmask){
 ```{r heatmap save, include=FALSE }
 
 if(params$unmask){
-  mad_values <- apply(betas_unmask, 1, mad)  # Calculate MAD, ignoring NAs
-  betas.sel <- betas_unmask[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+  if(is.null(params$batch_correction_method)){
+    mad_values <- apply(betas_unmask, 1, mad)  # Calculate MAD, ignoring NAs
+    betas.sel <- betas_unmask[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+  }
 }else{
-  mad_values <- apply(betas, 1, mad, na.rm = TRUE)  # Calculate MAD, ignoring NAs
-  betas.sel <- betas[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
+  mad_values <- apply(betas_clean, 1, mad, na.rm = TRUE)  # Calculate MAD, ignoring NAs
+  betas.sel <- betas_clean[order(mad_values, decreasing = TRUE)[1:10000], ]  # Subset the data to include only the top probes
   # betas.sel <- imputeBetas(betas.sel) # CANNOT do imputation since it turned out to alter the relationship between samples.
   betas.sel <- na.omit(betas.sel)
 }
@@ -344,7 +631,7 @@ annotation_colors <- lapply(sample_anno, function(x) {
   setNames(colors[seq_along(levels(x))], levels(x))
 })
 
-pdf(file.path(params$result_folder, "heatmap.pdf"), width = 8, height = 16)
+pdf(file.path(params$result_folder, "heatmap_top10k.pdf"), width = 8, height = 16)
 hm <- Heatmap(
   betas.sel,
   name = "Beta Values",  
@@ -367,7 +654,64 @@ dev.off()
 ```
 
 ```{r heatmap plot, results='asis'}
-cat(paste0('<iframe src="', file.path(params$result_folder, "heatmap.pdf"), '" width="100%" height="600px"></iframe>'))
+cat(paste0('<iframe src="', file.path(params$result_folder, "heatmap_top10k.pdf"), '" width="100%" height="600px"></iframe>'))
+```
+
+## Top1k probes
+
+```{r heatmap notes 2, results='asis'}
+if(params$unmask){
+  cat("Note that we used a probe matrix without masking bad detection p-values for the heatmap and unsupervised hierarchical clustering (Ward’s method). The unsupervised hierarchical clustering was done using the top 1k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. Probes were also clustered with the Ward's method. ")
+}else{
+  cat("The unsupervised hierarchical clustering (Ward’s method) was done using the top 1k probes with the highest Median Absolute Deviation (MAD) whose beta values were shown on the heatmap. Some beta values were masked due to low confidence in the detection of signals. It’s usually not recommended to use these low-confidence values in the downstream DM analysis. For heatmap visualization purpose, we removed any probes containing an NA value. Probes were then clustered with the Ward's method. ")
+}
+```
+
+```{r heatmap save 2, include=FALSE }
+
+if(params$unmask){
+  if(is.null(params$batch_correction_method)){
+    mad_values <- apply(betas_unmask, 1, mad)  # Calculate MAD, ignoring NAs
+    betas.sel <- betas_unmask[order(mad_values, decreasing = TRUE)[1:1000], ]  # Subset the data to include only the top probes
+  }
+}else{
+  mad_values <- apply(betas_clean, 1, mad, na.rm = TRUE)  # Calculate MAD, ignoring NAs
+  betas.sel <- betas_clean[order(mad_values, decreasing = TRUE)[1:1000], ]  # Subset the data to include only the top probes
+  # betas.sel <- imputeBetas(betas.sel) # CANNOT do imputation since it turned out to alter the relationship between samples.
+  betas.sel <- na.omit(betas.sel)
+}
+
+sample_anno <- coldata[,-c(1,2), drop = FALSE]
+sample_anno[] = lapply(sample_anno, as.factor)
+annotation_colors <- lapply(sample_anno, function(x) {
+  colors <- c(RColorBrewer::brewer.pal(8, "Set2"), RColorBrewer::brewer.pal(9, "Set1"))[1:length(levels(x))]
+  setNames(colors[seq_along(levels(x))], levels(x))
+})
+
+pdf(file.path(params$result_folder, "heatmap_top1k.pdf"), width = 8, height = 16)
+hm <- Heatmap(
+  betas.sel,
+  name = "Beta Values",  
+  col = colorRamp2(c(0, 0.5, 1), c("blue", "whitesmoke", "red")),  
+  na_col = "black",  
+  show_row_names = FALSE,
+  cluster_rows = TRUE,
+  clustering_method_columns = "ward.D2",  # Specify clustering method for columns
+  clustering_method_rows = "ward.D2",
+  use_raster = TRUE,
+  top_annotation = HeatmapAnnotation(
+    df = sample_anno,
+    col = annotation_colors,  # Assign colors automatically generated for each factor
+    annotation_name_side = "left"  # Position of the annotation name
+  )
+)
+draw(hm)
+dev.off()
+
+```
+
+```{r heatmap plot 2, results='asis'}
+cat(paste0('<iframe src="', file.path(params$result_folder, "heatmap_top1k.pdf"), '" width="100%" height="600px"></iframe>'))
 ```
 
 # Differentially methylated probes and regions
@@ -419,13 +763,26 @@ if(!params$skip_DM) {
     betas.sub = betas.sub[betas_ok,]
     if(params$test_mode) betas.sub = betas.sub[1:2000,] # for testing
     
-    if(rerun_DML) smry[[comp_name]] = DML(betas.sub, fm = ~Group, meta = coldata.sub)
-    test_result[[comp_name]] = summaryExtractTest(smry[[comp_name]])
-    
-    if(replicates) {
-      test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[5]] < pval, .[[7]] > eff_thres) %>% arrange(desc(.[[7]]))
+    if(is.null(params$batch_correction_method)) {
+      if(rerun_DML) smry[[comp_name]] = DML(betas.sub, fm = ~Group, meta = coldata.sub)
+      test_result[[comp_name]] = summaryExtractTest(smry[[comp_name]])
+      
+      if(replicates) {
+        test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[5]] < pval, .[[7]] > eff_thres) %>% arrange(desc(.[[7]]))
+      }else{
+        test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[7]] > eff_thres) %>% arrange(desc(.[[7]]))
+      }
     }else{
-      test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[7]] > eff_thres) %>% arrange(desc(.[[7]]))
+      if(rerun_DML) smry[[comp_name]] = DML(betas.sub, fm = ~Group+Batch, meta = coldata.sub)
+      test_result[[comp_name]] = summaryExtractTest(smry[[comp_name]])
+      
+      if(replicates) {
+        pval_index <- grep("^Pval_Group",colnames(test_result[[comp_name]]))
+        eff_index <- grep("Eff_Group",colnames(test_result[[comp_name]]))
+        test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[pval_index]] < pval, .[[eff_index]] > eff_thres) %>% arrange(desc(.[[pval_index]]))
+      }else{
+        test_result_sig[[comp_name]] = test_result[[comp_name]] %>% filter(.[[eff_index]] > eff_thres) %>% arrange(desc(.[[eff_index]]))
+      }
     }
     
     test_result_dt[[comp_name]] = DT::datatable(data = test_result_sig[[comp_name]][1:100,], caption = paste(comp_name, "Top 100 Differential Methylated CpGs"), rownames = F)
@@ -457,10 +814,6 @@ if(!params$skip_DM) {
 
 ```
 
-```{r save DML results}
-if(!params$skip_DM && !params$test_mode) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
-```
-
 ### Top 100 significant DMPs
 
 The tables below show top 100 significant DMPs. Please find the full significant DMP lists in the `DMP` folder.
@@ -486,7 +839,7 @@ if(!params$skip_DM) {
 ```{r barplot-function}
 DM_barplots <- function(plot_data, title){
   space = (max(plot_data$Hypermethylation)-min(plot_data$Hypomethylation))*0.15/2
-  bp_ratio = nrow(plot_data)/(max(plot_data$Hypermethylation)-min(plot_data$Hypomethylation))/4
+  bp_ratio = nrow(plot_data)/(max(plot_data$Hypermethylation)+max(plot_data$Hypomethylation))
   ggplot(plot_data, aes(x = Contrast)) +
     geom_bar(aes(y = Hypermethylation, fill = "Hypermethylation"), stat = "identity", position = "identity") +
     geom_bar(aes(y = -Hypomethylation, fill = "Hypomethylation"), stat = "identity", position = "identity") +
@@ -499,14 +852,13 @@ DM_barplots <- function(plot_data, title){
     theme_minimal() +
     theme(panel.grid.major.x = element_blank(),
           panel.border = element_rect(colour = "black", fill = NA),
-          legend.text = element_text(size = 11),
+          legend.text = element_text(size = 10),
           legend.title = element_text(size = 11),
-          axis.text.x = element_text(angle = 90, hjust = 1),
-          axis.text = element_text(size = 11),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text = element_text(size = 8),
           axis.text.y = element_blank(),   # Remove y-axis labels
           axis.title.y = element_blank()) +
-    ylim(-max(plot_data$Hypomethylation)-space*1.5,max(plot_data$Hypermethylation)+space*1.5) +
-    coord_fixed(ratio = bp_ratio)
+    ylim(-max(plot_data$Hypomethylation)-space*15,max(plot_data$Hypermethylation)+space*15) 
 }
 ```
 
@@ -520,69 +872,71 @@ if(!params$skip_DM) {
 }
 ```
 
-### Volcano plots of all CpGs
+<!-- ### Volcano plots of all CpGs -->
 
-```{r volcano-function}
-plot_volcano_dmp <- function(title, res, p.thres, fc.thres) {
-  res <- res %>% as.data.frame()
-  res_up <- res[res[, 3] > fc.thres & res[, 5] < p.thres, ] %>% na.omit()
-  res_down <- res[res[, 3] < -fc.thres & res[, 5] < p.thres, ] %>% na.omit()
-  # Prepare the base plot
-  vplot <- ggplot(res, aes(.data[[names(res)[3]]], -log10(.data[[names(res)[5]]]), text = Probe_ID)) +
-    geom_point(size = 2) +
-    geom_hline(yintercept = -log10(p.thres), linetype = "longdash", colour = "grey", size = 1) +
-    geom_vline(xintercept = fc.thres, linetype = "longdash", colour = "#BE684D", size = 1) +
-    geom_vline(xintercept = -fc.thres, linetype = "longdash", colour = "#2C467A", size = 1) +
-    labs(title = title, subtitle = "Volcano plot") +
-    ylab("-log10 P") +
-    xlab("DNA Methylation Difference") +
-    theme_bw() +
-    scale_x_continuous(limits = c(-1, 1), oob = scales::squish)
-  
-  # Highlight points based on thresholds
-  if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(x = .data[[names(res_up)[3]]], y = -log10(.data[[names(res_up)[5]]])), color = 'red') }
-  if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(x = .data[[names(res_down)[3]]], y = -log10(.data[[names(res_down)[5]]])), color = 'blue') }
-  
-  return(vplot)
-}
-plot_volcano_dmr <- function(title, res, p.thres, fc.thres) {
-  res <- res %>% as.data.frame()
-  res_up <- res[res[, "Seg_Est"] > fc.thres & res[, "Seg_Pval_adj"] < p.thres, ]
-  res_down <- res[res[, "Seg_Est"] < -fc.thres & res[, "Seg_Pval_adj"] < p.thres, ]
-  # Prepare the base plot
-  vplot <- ggplot(res, aes(Seg_Est, -log10(Seg_Pval_adj), text = Seg_ID)) +
-    geom_point(size = 2) +
-    geom_hline(yintercept = -log10(p.thres), linetype = "longdash", colour = "grey", size = 1) +
-    geom_vline(xintercept = fc.thres, linetype = "longdash", colour = "#BE684D", size = 1) +
-    geom_vline(xintercept = -fc.thres, linetype = "longdash", colour = "#2C467A", size = 1) +
-    labs(title = title, subtitle = "Volcano plot") +
-    ylab("-log10 Pval Adj") +
-    xlab("DNA Methylation Difference") +
-    theme_bw() +
-    scale_x_continuous(limits = c(-max(res[["Seg_Est"]]), max(res[["Seg_Est"]])), oob = scales::squish)
-  
-  # Highlight points based on thresholds
-  if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'red') }
-  if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'blue') }
-  
-  return(vplot)
-}
-```
+<!-- ```{r volcano-function} -->
+<!-- plot_volcano_dmp <- function(title, res, p.thres, fc.thres) { -->
+<!--   res <- res %>% as.data.frame() -->
+<!--   res_up <- res[res[, 3] > fc.thres & res[, 5] < p.thres, ] %>% na.omit() -->
+<!--   res_down <- res[res[, 3] < -fc.thres & res[, 5] < p.thres, ] %>% na.omit() -->
+<!--   # Prepare the base plot -->
+<!--   vplot <- ggplot(res, aes(.data[[names(res)[3]]], -log10(.data[[names(res)[5]]]), text = Probe_ID)) + -->
+<!--     geom_point(size = 2) + -->
+<!--     geom_hline(yintercept = -log10(p.thres), linetype = "longdash", colour = "grey", size = 1) + -->
+<!--     geom_vline(xintercept = fc.thres, linetype = "longdash", colour = "#BE684D", size = 1) + -->
+<!--     geom_vline(xintercept = -fc.thres, linetype = "longdash", colour = "#2C467A", size = 1) + -->
+<!--     labs(title = title, subtitle = "Volcano plot") + -->
+<!--     ylab("-log10 P") + -->
+<!--     xlab("DNA Methylation Difference") + -->
+<!--     theme_bw() + -->
+<!--     scale_x_continuous(limits = c(-0.8, 0.8), oob = scales::squish) -->
 
-```{r volcano}
-if(!params$skip_DM) {
-  for (x in names(test_result)) {
-    vp_list_dmp <- plot_volcano_dmp(x, test_result[[x]], pval, eff_thres)
-    print(vp_list_dmp)
-  }
-} 
-```
+<!--   # Highlight points based on thresholds -->
+<!--   if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(x = .data[[names(res_up)[3]]], y = -log10(.data[[names(res_up)[5]]])), color = 'red') } -->
+<!--   if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(x = .data[[names(res_down)[3]]], y = -log10(.data[[names(res_down)[5]]])), color = 'blue') } -->
+
+<!--   interactive_plot <- plotly::ggplotly(vplot, tooltip = "text") -->
+<!--   return(interactive_plot) -->
+<!-- } -->
+<!-- plot_volcano_dmr <- function(title, res, p.thres, fc.thres) { -->
+<!--   res <- res %>% as.data.frame() -->
+<!--   res_up <- res[res[, "Seg_Est"] > fc.thres & res[, "Seg_Pval_adj"] < p.thres, ] -->
+<!--   res_down <- res[res[, "Seg_Est"] < -fc.thres & res[, "Seg_Pval_adj"] < p.thres, ] -->
+<!--   # Prepare the base plot -->
+<!--   vplot <- ggplot(res, aes(Seg_Est, -log10(Seg_Pval_adj), text = Seg_ID)) + -->
+<!--     geom_point(size = 2) + -->
+<!--     geom_hline(yintercept = -log10(p.thres), linetype = "longdash", colour = "grey", size = 1) + -->
+<!--     geom_vline(xintercept = fc.thres, linetype = "longdash", colour = "#BE684D", size = 1) + -->
+<!--     geom_vline(xintercept = -fc.thres, linetype = "longdash", colour = "#2C467A", size = 1) + -->
+<!--     labs(title = title, subtitle = "Volcano plot") + -->
+<!--     ylab("-log10 Pval Adj") + -->
+<!--     xlab("DNA Methylation Difference") + -->
+<!--     theme_bw() + -->
+<!--     scale_x_continuous(limits = c(-max(res[["Seg_Est"]]), max(res[["Seg_Est"]])), oob = scales::squish) -->
+
+<!--   # Highlight points based on thresholds -->
+<!--   if (nrow(res_up) > 0) { vplot <- vplot + geom_point(data = res_up, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'red') } -->
+<!--   if (nrow(res_down) > 0) { vplot <- vplot + geom_point(data = res_down, aes(Seg_Est, -log10(Seg_Pval_adj)), color = 'blue') } -->
+
+<!--   interactive_plot <- plotly::ggplotly(vplot, tooltip = "text") -->
+<!--   return(interactive_plot) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r volcano} -->
+<!-- if(!params$skip_DM) { -->
+<!--   vp_list_dmp <- lapply(names(test_result), function(x) plot_volcano_dmp(x, test_result[[x]], pval, eff_thres)) -->
+<!--   htmltools::tagList(setNames(vp_list_dmp, NULL)) -->
+<!-- } -->
+<!-- ``` -->
 
 ## Differentially methylated regions (DMRs)
 
 ```{r warning flag, results='asis'}
-if(!params$skip_DM & length(warning_flag)>0) {
-  cat("***Note that for comparison(s) ", paste(warning_flag, sep = ", "), ", neither group had a replicate. So there was no p value could be produced for DMRs. The results below show all DMRs mapping to the CpGs with an effective size > ", eff_thres, ".***<br>", sep = "")
+if(!params$skip_DM) {
+  if(length(warning_flag)>0) {
+    cat("***Note that for comparison(s) ", paste(warning_flag, sep = ", "), ", neither group had a replicate. So there was no p value could be produced for DMRs. The results below show all DMRs mapping to the CpGs with an effective size > ", eff_thres, ".***<br>", sep = "")
+  }
 }
 ```
 
@@ -608,71 +962,128 @@ if(!params$skip_DM) {
 }
 ```
 
-### Volcano plots of all CpGs-merged regions
+<!-- ### Volcano plots of all CpGs-merged regions -->
 
-*Note that the number of significant DMR shown in the volcano plot can be larger than those in the bar-plots and tables above because non-chromosome CpGs are also shown here.*
+<!-- *Note that the number of significant DMR shown in the volcano plot can be larger than those in the bar-plots and tables above because non-chromosome CpGs are also shown here.* -->
 
-```{r volcano regions}
-if(!params$skip_DM) {
-  for (x in names(merged)) {
-    vp_list_dmr <- plot_volcano_dmr(x, merged[[x]], seg_fdr, eff_thres)
-    print(vp_list_dmr)
-  }
-}
-```
+<!-- ```{r volcano regions} -->
+<!-- if(!params$skip_DM) { -->
+<!--   vp_list_dmr <- lapply(names(merged), function(x) plot_volcano_dmr(x, merged[[x]], seg_fdr, eff_thres)) -->
+<!--   htmltools::tagList(setNames(vp_list_dmr, NULL)) -->
+<!-- } -->
+<!-- ``` -->
 
 # Differentially methylated probe (DMP) enrichment 
-
-```{r enrichment results folder}
-if(!params$skip_DM) { 
-  if(!dir.exists(file.path(params$result_folder, "Enrichment"))) dir.create(file.path(params$result_folder, "Enrichment"))
-}
-```
 
 ## Feature enrichment
 
 Available database sets are listed in the table below. 
 
 ```{r database table}
-if(!params$skip_DM) KYCG_listDBGroups(params$platform) %>% DT::datatable(rownames = FALSE)
+listDBGroups(params$platform) %>% DT::datatable(rownames = FALSE)
 ```
 
 ### Significant DMPs enriched features
 
-The tables below show features enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+The tables below show TFBS enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
 
-```{r enrichment test}
+```{r enrichment test 1}
 if(!params$skip_DM) {
-  if (!exists("query")) query <- lapply(test_result_sig, function(x) x$Probe_ID)
-  if (!exists("cpg_enrichment_result")) cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, platform = params$platform))
-  lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_feature_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE)) %>% invisible()
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "TFBS", platform = params$platform))
   cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
   htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
 }
 ```
 
-### Top 20 enriched features
+The dot plots below show the top 20 enriched TFBS Dot color indicates odds ratio (OR) in the Fisher's test. 
 
-The dot plots below show the top 20 enriched genes. Dot color indicates odds ratio (OR) in the Fisher's test. 
-
-```{r enrichment dotplot, results = 'hide'}
-if(!params$skip_DM) lapply(names(cpg_enrichment_result), function(x) KYCG_plotDot(cpg_enrichment_result[[x]], title = paste(x, "Top 20 Feature Enrichments"))) 
+```{r enrichment dotplot 1, results = 'hide'}
+if(!params$skip_DM) {
+  lapply(names(cpg_enrichment_result), function(x) KYCG_plotDot(cpg_enrichment_result[[x]], title = paste(x, "Top 20 Feature Enrichments")))
+}
 ```
 
-### Additional database sets
+The tables below show HM enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
 
-Additional GpG database sets available for the enrichment analysis are listed in the table below. This collection was downloaded from https://github.com/zhou-lab/KYCG_knowledgebase_EPICv2/tree/main. Please contact us further if you would like to test for the additional database. 
-
-```{r additional databases}
+```{r enrichment test 2}
 if(!params$skip_DM) {
-  more_dbs <- KYCG_loadDBs("KYCG_knowledgebase_EPICv2")
-  lapply(more_dbs, attr, "group") %>% unlist %>% unique %>% as.tibble() %>% setNames("Database Group") %>% DT::datatable()
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "HM", platform = params$platform))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+}
+```
+
+The tables below show Mask enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r enrichment test 3}
+if(!params$skip_DM) {
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "Mask", platform = params$platform))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+}
+```
+
+The tables below show ABCompartment enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r enrichment test 4}
+if(!params$skip_DM) {
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "ABCompartment", platform = params$platform))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+}
+```
+
+The tables below show ImprintingDMR enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r enrichment test 5}
+if(!params$skip_DM) {
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "ImprintingDMR", platform = params$platform))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+}
+```
+
+The tables below show ChromHMM enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r enrichment test 6}
+if(!params$skip_DM) {
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "ChromHMM", platform = params$platform))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+}
+```
+
+The tables below show MetagenePC enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r enrichment test 7}
+if(!params$skip_DM) {
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "MetagenePC", platform = params$platform))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
+}
+```
+
+The tables below show CTCFbind enriched with DMPs. Results were filtered with FDR < 0.05 and overlap > 10. 
+
+```{r enrichment test 8}
+if(!params$skip_DM) {
+  query <- lapply(test_result_sig, function(x) x$Probe_ID)
+  cpg_enrichment_result <- lapply(query, function(x) testEnrichment(query = x, databases = "CTCFbind", platform = params$platform))
+  cpg_enrichment_result_dt <- lapply(names(cpg_enrichment_result), function(x) cpg_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, test, FDR) %>% DT::datatable(caption = paste(x, "Feature Enrichments")))
+  htmltools::tagList(setNames(cpg_enrichment_result_dt, NULL))
 }
 ```
 
 ```{r additional enrichment test for selected database}
 # test for a selected database (pending function ...)
-# dbs <- KYCG_getDBs(group_nms = KYCG_listDBGroups(params$platform)[[1]][1], platform = params$platform)
+# dbs <- getDBs(group_nms = listDBGroups(params$platform)[[1]][1], platform = params$platform)
 # cpg_enrichment_result <- lapply(query, function(x) testEnrichment(x, databases = dbs, platform = params$platform))
 ```
 
@@ -684,8 +1095,7 @@ Test whether the DMP sets are enriched for any genes. Probe-gene distance for as
 
 ```{r gene enrichment}
 if(!params$skip_DM) {
-  if(!exists("gene_enrichment_result")) gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, KYCG_buildGeneDBs(x, max_distance=10000), platform = params$platform))
-  lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% write.csv(file = paste0(params$result_folder, "/Enrichment/DMP_gene_enrichment_", gsub("\\s", "_", x), ".csv"), row.names = FALSE)) %>% invisible()
+  gene_enrichment_result <- lapply(query, function(x) testEnrichment(x, buildGeneDBs(x, max_distance=10000), platform = params$platform))
   gene_enrichment_result_dt <- lapply(names(gene_enrichment_result), function(x) gene_enrichment_result[[x]] %>% dplyr::filter(overlap>10) %>% dplyr::filter(FDR<0.05) %>% dplyr::select(dbname, estimate, gene_name, FDR, nQ, nD, overlap) %>% DT::datatable(caption = paste(x, "Gene Enrichments")))
   htmltools::tagList(setNames(gene_enrichment_result_dt, NULL))
 }
@@ -696,7 +1106,9 @@ if(!params$skip_DM) {
 The dot plots below show the top 20 enriched genes. Dot color indicates odds ratio (OR) in the Fisher's test. 
 
 ```{r gene enrichment plot, results = 'hide'}
-if(!params$skip_DM) lapply(names(gene_enrichment_result), function(x) KYCG_plotDot(gene_enrichment_result[[x]], label_by = "gene_name", title = paste(x, "Top 20 Gene Enrichments")))
+if(!params$skip_DM) {
+  lapply(names(gene_enrichment_result), function(x) KYCG_plotDot(gene_enrichment_result[[x]], label_by = "gene_name", title = paste(x, "Top 20 Gene Enrichments")))
+}
 ```
 
 ## Gene-set over-representatoin analysis
@@ -722,10 +1134,10 @@ gs_dotplot <- function(clusterProfResult, fdr_thres, title) {
     theme_bw() +
     theme(
       axis.text = element_text(colour = "black"),
-      axis.text.x = element_text(size = 12, angle = 90, vjust = 0.5, hjust = 1),
-      axis.text.y = element_text(size = 10),
-      legend.title = element_text(size = 14),
-      legend.text = element_text(size = 12),
+      axis.text.x = element_text(size = 3, angle = 90, vjust = 0.5, hjust = 0.5),
+      axis.text.y = element_text(size = 8),
+      legend.title = element_text(size = 12),
+      legend.text = element_text(size = 10),
       plot.margin = unit(c(0.5, 0.5, 0.1, 0.1), "cm")
     ) +
     labs(title = title, x = "", y = "", caption = "") +
@@ -737,12 +1149,15 @@ gs_dotplot <- function(clusterProfResult, fdr_thres, title) {
 
 ```{r gene input}
 if(!params$skip_DM) {
-  if(!exists("ora_genes")) ora_genes <- lapply(query, function(x) lapply(KYCG_buildGeneDBs(x, max_distance = 10000), function(y) attributes(y)$gene_name) %>% unlist(use.names = FALSE) %>% unique())
+  ora_genes <- lapply(query, function(x) lapply(buildGeneDBs(x, max_distance = 10000), function(y) attributes(y)$gene_name) %>% unlist(use.names = FALSE) %>% unique())
 }
 ```
 
-```{r functional enrichment, fig.height=12, fig.width=12}
+```{r functional enrichment}
 if(!params$skip_DM) {
+
+  if(!dir.exists(file.path(params$result_folder, "ORA"))) dir.create(file.path(params$result_folder, "ORA"))
+
   if (params$species == "human") {
     gsorDb <- "org.Hs.eg.db"
     keggOrg <- 'hsa'
@@ -761,43 +1176,37 @@ if(!params$skip_DM) {
 
   deGenes_ora <- ora_genes[sapply(ora_genes, length) >= 20]
 
-  if (!exists("enrichGO_res")) {
-    enrichGO_res <- list()
-    go_cat <- c('BP','CC','MF')
+  enrichGO_res <- list()
+  go_cat <- c('BP','CC','MF')
 
-    if (!all(sapply(deGenes_ora, length) == 0)) {
-      # run GO enrichment analysis
-      enrichGO_res$all <- lapply(go_cat, function(x) clusterProfiler::compareCluster(geneCluster = deGenes_ora, fun = 'enrichGO', keyType = 'SYMBOL', OrgDb = gsorDb, ont = x, readable = TRUE)) %>% setNames(go_cat)
-      # remove null elements
-      enrichGO_res$all <- if (all(sapply(enrichGO_res$all, is.null))) NULL else enrichGO_res$all[!sapply(enrichGO_res$all, is.null)]
-    }
+  if (!all(sapply(deGenes_ora, length) == 0)) {
+    # run GO enrichment analysis
+    enrichGO_res$all <- lapply(go_cat, function(x) clusterProfiler::compareCluster(geneCluster = deGenes_ora, fun = 'enrichGO', keyType = 'SYMBOL', OrgDb = gsorDb, ont = x, readable = TRUE)) %>% setNames(go_cat)
+    # remove null elements
+    enrichGO_res$all <- if (all(sapply(enrichGO_res$all, is.null))) NULL else enrichGO_res$all[!sapply(enrichGO_res$all, is.null)]
   }
-
   if (!is.null(enrichGO_res$all)) {
     # plot the enriched GO terms
     lapply(names(enrichGO_res$all), function(x) gs_dotplot(enrichGO_res$all[[x]], params$ora_fdr_thres, paste0("Top 10 enriched GO ", x, " terms per contrast"))) %>% invisible()
     # save the enriched GO terms
-    lapply(names(enrichGO_res$all), function(x) lapply(names(deGenes_ora), function(y) readr::write_csv(subset(enrichGO_res$all[[x]]@compareClusterResult, Cluster==y & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_GO_", x, "_", gsub(" ", "_", y), "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv")))) %>% invisible()
+    lapply(names(enrichGO_res$all), function(x) lapply(names(deGenes_ora), function(y) readr::write_csv(subset(enrichGO_res$all[[x]]@compareClusterResult, Cluster==y & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "ORA"), "/ORA_GO_", x, "_", gsub(" ", "_", y), "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv")))) %>% invisible()
   }
 
-  if (!exists("enrichKEGG_res")) {
-    enrichKEGG_res <- list()
+  enrichKEGG_res <- list()
 
-    if (!all(sapply(deGenes_ora, length) == 0)) {
-      # map gene names to entrez ids
-      deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
-      # run KEGG enrichment analysis
-      enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
-      # map entrez ids back to gene names
-      enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
-    }
+  if (!all(sapply(deGenes_ora, length) == 0)) {
+    # map gene names to entrez ids
+    deEntrez <- lapply(deGenes_ora, function(x) bitr(x, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = gsorDb)$ENTREZID)
+    # run KEGG enrichment analysis
+    enrichKEGG_res$all <- clusterProfiler::compareCluster(geneCluster = deEntrez, fun = 'enrichKEGG', organism = keggOrg)
   }
-
   if (!is.null(enrichKEGG_res$all)) {
     # plot the enriched KEGG pathways
     gs_dotplot(enrichKEGG_res$all, params$ora_fdr_thres, "Top 10 enriched KEGG pathways per contrast")
+    # map entrez ids back to gene names
+    enrichKEGG_res$all@compareClusterResult$geneID <- lapply(enrichKEGG_res$all@compareClusterResult$geneID, function(x) unlist(strsplit(x, "/")) %>% bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = gsorDb) %>% dplyr::select(SYMBOL) %>% unlist() %>% paste(collapse = "/")) %>% unlist()
     # save the enriched KEGG pathways
-    lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "Enrichment"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
+    lapply(names(deGenes_ora), function(x) readr::write_csv(subset(enrichKEGG_res$all@compareClusterResult, Cluster==x & p.adjust<params$ora_fdr_thres), file = paste0(file.path(params$result_folder, "ORA"), "/ORA_KEGG_", x, "_padj", sub("0\\.", "", as.character(params$ora_fdr_thres)), ".csv"))) %>% invisible()
   }
 }
 ```
@@ -805,14 +1214,18 @@ if(!params$skip_DM) {
 # Metagene methylation levels
 
 ```{r metagene}
-betas_meta <- betas
-rownames(betas_meta) <- gsub("_.*", "", rownames(betas_meta))
-KYCG_plotMeta(betas_meta)
+if(!params$skip_DM) {
+  betas_meta <- betas
+  rownames(betas_meta) <- gsub("_.*", "", rownames(betas_meta))
+  KYCG_plotMeta(betas_meta)
+}
 ```
 
 # Track view with heatmap
 
 We are able to visualize the methylation level across a given genomic region, around a given gene, or around a given probe. Below shows an example of the visualization. Please contact us further if you would like to visualize certain genomic regions. 
+
+The vertical red line on chromosome cytoband indicates the location of the target gene/region. The black boxes are gene bodies. The red boxes inside are exons. There could be multiple gene bodies shown if they are overlapped within the same genomic region. The plot usually shows 2kb flanking regions of the target gene/region. 
 
 ```{r track view with heatmap}
 visualizeGene('DNMT1', betas)
@@ -821,11 +1234,21 @@ visualizeGene('DNMT1', betas)
 # visualizeProbes(c("cg00000165"), betas, platform="EPIC", genome = "hg38", upstream = 2000, dwstream = 2000)
 ```
 
-```{r save enrichment results}
-if(!params$skip_DM && !params$test_mode) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
+------------------------------------------------------------------------
+
+# Copy Number Variation
+
+```{r cnv, results='asis'}
+for (s in names(segs)) {
+  cat("\n\n", s, "(", as.character(coldata[coldata$IDAT==s,"Group"]), ")\n\n")
+  # visualizeSegments(segs[[s]]) %>% print()
+  visualizeSegments(segs[[s]], to.plot=paste0("chr", 1:22)) %>% print()
+}
 ```
 
-------------------------------------------------------------------------
+```{r save DML results}
+if(!params$skip_DM && !params$test_mode) save(list = ls()[-grep("params", ls())], file = paste0(params$result_folder, ".RData"))
+```
 
 # Session info
 
@@ -834,3 +1257,4 @@ The output from running 'sessionInfo' is shown below and details all packages an
 ```{r session info}
 sessionInfo()
 ```
+

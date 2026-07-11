@@ -9,6 +9,11 @@ Before rendering, check the following parameters:
 - `result_folder`: name of the folder to save results; will also be the name of `.RData` output.
 - `remove_bad_samples`: whether to remove samples with <40% success detection rate.
 - `unmask`: whether to use unmasked beta values for tSNE and heatmap with clustering.
+- `extra_mask`: whether to apply extra mask on probes with EPICv2manifest[["CH_WGBS_evidence"]]=="Y".
+- `pOOBAH_pval`: minimum detection p-val to mask a probe.
+- `match_design`: normalize Infinium I probe betas to Infinium II. See [docs/matchDesign.md](docs/matchDesign.md) for when and why to use it.
+- `batch_correction_method`: can be limma, combat, or icombat; keep empty if no batch to correct for.
+- `batch_to_correct`: if using icombat, provide the new batch to correct for; can be a vector for multiple batches; keep empty if no batch correction is needed.
 - `tSNE_perplexity`: perplexity to use in tSNE.
 - `skip_DM`: whether to skip the differential methylation test. This must be TRUE when rendering the script on local machine with a relatively low memory.
 - `test_mode`: whether to test the script using the first 2000 probes of each sample only and not to overwrite current .RData output; usually used on a local machine.
